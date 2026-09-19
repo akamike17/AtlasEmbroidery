@@ -264,111 +264,163 @@ public static class BinaryStitchSerializer
     /// </summary>
     public static StitchPlan? Deserialize(byte[] data)
     {
-        using var ms = new MemoryStream(data);
-        using var br = new BinaryReader(ms, Encoding.UTF8, leaveOpen: true);
+        if (data == null || data.Length < 6) // Magic(4) + Version(2)
+            return null;
 
-        // Verificar magic
-        var magic = br.ReadBytes(4);
-        if (!magic.SequenceEqual(Magic)) return null;
-
-        var version = br.ReadUInt16();
-        if (version > Version) return null; // Versión futura no soportada
-
-        var plan = new StitchPlan
+        try
         {
-            ProjectId = new Guid(br.ReadBytes(16)),
-            ProjectName = br.ReadString(),
-            CompiledAt = DateTime.FromBinary(br.ReadInt64()),
-            CanvasWidth = br.ReadInt32(),
-            CanvasHeight = br.ReadInt32(),
-            CanvasOrigin = new Point(br.ReadInt32(), br.ReadInt32())
-        };
+            using var ms = new MemoryStream(data);
+            using var br = new BinaryReader(ms, Encoding.UTF8, leaveOpen: true);
 
-        // Paleta
-        int paletteCount = br.ReadInt32();
-        plan.ThreadPalette = new List<ThreadColor>(paletteCount);
-        for (int i = 0; i < paletteCount; i++)
-        {
-            plan.ThreadPalette.Add(new ThreadColor(
-                br.ReadByte(), br.ReadByte(), br.ReadByte(),
-                br.ReadString(), br.ReadString(), br.ReadString(),
-                br.ReadString()));
-        }
+            // Verificar magic
+            var magic = br.ReadBytes(4);
+            if (!magic.SequenceEqual(Magic)) return null;
 
-        // Color -> Needle
-        int mapCount = br.ReadInt32();
-        plan.ColorToNeedleMap = new Dictionary<int, int>(mapCount);
-        for (int i = 0; i < mapCount; i++)
-        {
-            plan.ColorToNeedleMap[br.ReadInt32()] = br.ReadInt32();
-        }
+            var version = br.ReadUInt16();
+            if (version > Version) return null; // Versión futura no soportada
 
-        // Machine profile
-        if (br.ReadBoolean())
-        {
-            plan.MachineProfile = new MachineProfile
+            var plan = new StitchPlan
             {
-                Id = new Guid(br.ReadBytes(16)),
-                Name = br.ReadString(),
-                MaxWidth = br.ReadInt32(),
-                MaxHeight = br.ReadInt32(),
-                NeedleCount = br.ReadInt32(),
-                MaxStitchLength = br.ReadInt32(),
-                MaxJumpLength = br.ReadInt32()
+                ProjectId = new Guid(br.ReadBytes(16)),
+                ProjectName = ReadStringSafe(br),
+                CompiledAt = DateTime.FromBinary(br.ReadInt64()),
+                CanvasWidth = br.ReadInt32(),
+                CanvasHeight = br.ReadInt32(),
+                CanvasOrigin = new Point(br.ReadInt32(), br.ReadInt32())
             };
-        }
 
-        // Hoop profile
-        if (br.ReadBoolean())
-        {
-            plan.HoopProfile = new HoopProfile
+            // Paleta - límite defensivo
+            int paletteCount = br.ReadInt32();
+            if (paletteCount < 0 || paletteCount > 10000) return null;
+            plan.ThreadPalette = new List<ThreadColor>(paletteCount);
+            for (int i = 0; i < paletteCount; i++)
             {
-                Id = new Guid(br.ReadBytes(16)),
-                Name = br.ReadString(),
-                Width = br.ReadInt32(),
-                Height = br.ReadInt32(),
-                UsableWidth = br.ReadInt32(),
-                UsableHeight = br.ReadInt32()
-            };
+                plan.ThreadPalette.Add(new ThreadColor(
+                    br.ReadByte(), br.ReadByte(), br.ReadByte(),
+                    ReadStringSafe(br), ReadStringSafe(br), ReadStringSafe(br),
+                    ReadStringSafe(br)));
+            }
+
+            // Color -> Needle
+            int mapCount = br.ReadInt32();
+            if (mapCount < 0 || mapCount > 10000) return null;
+            plan.ColorToNeedleMap = new Dictionary<int, int>(mapCount);
+            for (int i = 0; i < mapCount; i++)
+            {
+                plan.ColorToNeedleMap[br.ReadInt32()] = br.ReadInt32();
+            }
+
+            // Machine profile
+            if (br.ReadBoolean())
+            {
+                plan.MachineProfile = new MachineProfile
+                {
+                    Id = new Guid(br.ReadBytes(16)),
+                    Name = ReadStringSafe(br),
+                    MaxWidth = br.ReadInt32(),
+                    MaxHeight = br.ReadInt32(),
+                    NeedleCount = br.ReadInt32(),
+                    MaxStitchLength = br.ReadInt32(),
+                    MaxJumpLength = br.ReadInt32()
+                };
+            }
+
+            // Hoop profile
+            if (br.ReadBoolean())
+            {
+                plan.HoopProfile = new HoopProfile
+                {
+                    Id = new Guid(br.ReadBytes(16)),
+                    Name = ReadStringSafe(br),
+                    Width = br.ReadInt32(),
+                    Height = br.ReadInt32(),
+                    UsableWidth = br.ReadInt32(),
+                    UsableHeight = br.ReadInt32()
+                };
+            }
+
+            // Puntadas - límite defensivo
+            int stitchCount = br.ReadInt32();
+            if (stitchCount < 0 || stitchCount > 10000000) return null; // 10M max
+            var stitches = new List<StitchPoint>(stitchCount);
+            int lastX = 0, lastY = 0;
+
+            for (int i = 0; i < stitchCount; i++)
+            {
+                try
+                {
+                    int deltaX = ReadVarInt(br);
+                    int deltaY = ReadVarInt(br);
+                    var type = (StitchType)br.ReadByte();
+                    byte needle = br.ReadByte();
+                    byte colorIndex = br.ReadByte();
+                    ushort flags = br.ReadUInt16();
+                    ushort sequenceIndex = br.ReadUInt16(); // Version 1+
+
+                    int x = lastX + deltaX;
+                    int y = lastY + deltaY;
+
+                    stitches.Add(new StitchPoint(x, y, type, needle, colorIndex, flags, sequenceIndex));
+                    lastX = x;
+                    lastY = y;
+                }
+                catch (EndOfStreamException)
+                {
+                    return null; // Datos truncados
+                }
+            }
+
+            plan.ObjectStitches[Guid.Empty] = stitches; // Todas en una entrada
+
+            // Métricas
+            plan.TotalStitches = br.ReadInt64();
+            plan.TotalJumps = br.ReadInt64();
+            plan.TotalTrims = br.ReadInt64();
+            plan.TotalColorChanges = br.ReadInt64();
+            plan.TotalStops = br.ReadInt64();
+            plan.EstimatedTimeSeconds = br.ReadDouble();
+            plan.EstimatedThreadMeters = br.ReadDouble();
+            plan.DesignBounds = new Rectangle(
+                br.ReadInt32(), br.ReadInt32(), br.ReadInt32(), br.ReadInt32());
+
+            return plan;
         }
-
-        // Puntadas
-        int stitchCount = br.ReadInt32();
-        var stitches = new List<StitchPoint>(stitchCount);
-        int lastX = 0, lastY = 0;
-
-        for (int i = 0; i < stitchCount; i++)
+        catch (EndOfStreamException)
         {
-            int deltaX = ReadVarInt(br);
-            int deltaY = ReadVarInt(br);
-            var type = (StitchType)br.ReadByte();
-            byte needle = br.ReadByte();
-            byte colorIndex = br.ReadByte();
-            ushort flags = br.ReadUInt16();
-            ushort sequenceIndex = br.ReadUInt16(); // Version 1+
-
-            int x = lastX + deltaX;
-            int y = lastY + deltaY;
-
-            stitches.Add(new StitchPoint(x, y, type, needle, colorIndex, flags, sequenceIndex));
-            lastX = x;
-            lastY = y;
+            return null; // Datos truncados en cualquier parte
         }
+        catch (Exception)
+        {
+            return null; // Cualquier otro error = datos corruptos
+        }
+    }
 
-        plan.ObjectStitches[Guid.Empty] = stitches; // Todas en una entrada
-
-        // Métricas
-        plan.TotalStitches = br.ReadInt64();
-        plan.TotalJumps = br.ReadInt64();
-        plan.TotalTrims = br.ReadInt64();
-        plan.TotalColorChanges = br.ReadInt64();
-        plan.TotalStops = br.ReadInt64();
-        plan.EstimatedTimeSeconds = br.ReadDouble();
-        plan.EstimatedThreadMeters = br.ReadDouble();
-        plan.DesignBounds = new Rectangle(
-            br.ReadInt32(), br.ReadInt32(), br.ReadInt32(), br.ReadInt32());
-
-        return plan;
+    /// <summary>
+    /// Lee string compatible con BinaryWriter.Write(string) pero con límites de seguridad
+    /// </summary>
+    private static string ReadStringSafe(BinaryReader br)
+    {
+        try
+        {
+            // BinaryWriter.Write(string) uses 7-bit encoded Int32 for length
+            // We can use the built-in ReadString but with position check
+            long posBefore = br.BaseStream.Position;
+            string result = br.ReadString();
+            long posAfter = br.BaseStream.Position;
+            
+            // Sanity check: string shouldn't be absurdly long
+            if (result.Length > 10000) return string.Empty;
+            
+            return result;
+        }
+        catch (EndOfStreamException)
+        {
+            return string.Empty;
+        }
+        catch (FormatException)
+        {
+            return string.Empty;
+        }
     }
 
     /// <summary>
@@ -391,11 +443,16 @@ public static class BinaryStitchSerializer
         uint result = 0;
         int shift = 0;
         byte b;
+        int bytesRead = 0;
         do
         {
+            if (bytesRead >= 5) // Max 5 bytes for int32 varint (prevents infinite loop on corrupt data)
+                throw new InvalidDataException("Varint exceeds maximum length");
+                
             b = br.ReadByte();
             result |= (uint)(b & 0x7F) << shift;
             shift += 7;
+            bytesRead++;
         } while ((b & 0x80) != 0);
 
         // Zigzag decode

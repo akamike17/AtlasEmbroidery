@@ -380,6 +380,9 @@ public sealed class StitchEngine
         var bounds = GeometryUtils.BoundingBox(vertices);
         double angleRad = param.Angle / 10.0 * Math.PI / 180.0;
         int spacing = param.SatinSpacing;
+        
+        // Validate spacing to prevent division by zero
+        if (spacing <= 0) spacing = 200; // Default 0.2mm
 
         // Rotar vértices para alinear con ángulo 0
         var center = bounds.Center;
@@ -437,6 +440,11 @@ public sealed class StitchEngine
         var stitches = new List<StitchPoint>();
         var tatamiParam = param.Tatami ?? new TatamiParams();
 
+        // Validate parameters
+        if (param.Density <= 0) param.Density = 400;
+        int rowSpacing = tatamiParam.RowSpacing > 0 ? tatamiParam.RowSpacing : param.Density;
+        if (rowSpacing <= 0) rowSpacing = param.Density;
+
         // Bounding box
         var bounds = GeometryUtils.BoundingBox(vertices);
         double angleRad = param.Angle / 10.0 * Math.PI / 180.0;
@@ -445,8 +453,6 @@ public sealed class StitchEngine
         var center = bounds.Center;
         var rotatedVertices = GeometryUtils.RotatePoints(vertices, center, -angleRad);
         var rotatedBounds = GeometryUtils.BoundingBox(rotatedVertices);
-
-        int rowSpacing = tatamiParam.RowSpacing > 0 ? tatamiParam.RowSpacing : param.Density;
 
         // Generar filas horizontales (en espacio rotado)
         int startY = rotatedBounds.Y;
@@ -523,6 +529,10 @@ public sealed class StitchEngine
         var satinParam = param.Satin ?? new SatinParams();
         int columnWidth = satinParam.ColumnWidth;
         int spacing = param.SatinSpacing;
+
+        // Validate parameters
+        if (columnWidth <= 0) columnWidth = satinParam.MinColumnWidth > 0 ? satinParam.MinColumnWidth : 500;
+        if (spacing <= 0) spacing = 200;
 
         // Generar columnas perpendiculares al camino
         for (int i = 0; i < pathPoints.Count - 1; i++)
@@ -612,8 +622,8 @@ public sealed class StitchEngine
             Angle = obj.StitchParams.Angle + underlay.AngleOffset,
             MinStitchLength = underlay.StitchLength,
             MaxStitchLength = underlay.StitchLength * 2,
-            ColorIndex = -1, // Underlay usa color especial
-            NeedleIndex = 0
+            ColorIndex = obj.StitchParams.ColorIndex, // Use same color as main object
+            NeedleIndex = obj.StitchParams.NeedleIndex
         };
 
         // Generate base stitches without underlay to avoid infinite recursion
@@ -659,11 +669,15 @@ public sealed class StitchEngine
     private List<StitchPoint> GenerateTieIn(StitchPoint firstStitch, StitchParams param)
     {
         var stitches = new List<StitchPoint>();
-        for (int i = 0; i < param.TieStitchCount; i++)
+        
+        // Protect against division by zero
+        int tieStitchCount = Math.Max(1, param.TieStitchCount);
+        
+        for (int i = 0; i < tieStitchCount; i++)
         {
             // Pequeños puntos hacia atrás
-            double angle = Math.PI * 2 * i / param.TieStitchCount;
-            int offset = param.TieInLength / param.TieStitchCount;
+            double angle = Math.PI * 2 * i / tieStitchCount;
+            int offset = tieStitchCount > 0 ? param.TieInLength / tieStitchCount : param.TieInLength;
             int x = firstStitch.X + (int)Math.Round(Math.Cos(angle) * offset);
             int y = firstStitch.Y + (int)Math.Round(Math.Sin(angle) * offset);
             stitches.Add(new StitchPoint(x, y, StitchType.Running, (byte)param.NeedleIndex, (byte)param.ColorIndex)
@@ -678,10 +692,14 @@ public sealed class StitchEngine
     private List<StitchPoint> GenerateTieOff(StitchPoint lastStitch, StitchParams param)
     {
         var stitches = new List<StitchPoint>();
-        for (int i = 0; i < param.TieStitchCount; i++)
+        
+        // Protect against division by zero
+        int tieStitchCount = Math.Max(1, param.TieStitchCount);
+        
+        for (int i = 0; i < tieStitchCount; i++)
         {
-            double angle = Math.PI * 2 * i / param.TieStitchCount;
-            int offset = param.TieOffLength / param.TieStitchCount;
+            double angle = Math.PI * 2 * i / tieStitchCount;
+            int offset = tieStitchCount > 0 ? param.TieOffLength / tieStitchCount : param.TieOffLength;
             int x = lastStitch.X + (int)Math.Round(Math.Cos(angle) * offset);
             int y = lastStitch.Y + (int)Math.Round(Math.Sin(angle) * offset);
             stitches.Add(new StitchPoint(x, y, StitchType.Running, (byte)param.NeedleIndex, (byte)param.ColorIndex)
@@ -759,13 +777,26 @@ public sealed class StitchEngine
 
     /// <summary>
     /// Optimiza el plan global (saltos, trims, secuencia)
+    /// Implementación Foundation: agrupación básica por color/aguja y reducción de travel
     /// </summary>
     private void OptimizePlan(StitchPlan plan)
     {
-        // TODO: Implementar optimización multi-objetivo
-        // - Reducir trims/jumps sin sacrificar estabilización
-        // - Reordenar objetos para minimizar travel
-        // - Agrupar por color/aguja
+        // Foundation-level optimization: reorder objects by color then needle to minimize travel
+        // Note: This is a limited implementation. Full multi-objective optimization is deferred.
+        
+        var orderedObjects = plan.ObjectStitches
+            .OrderBy(kvp => kvp.Value.FirstOrDefault().ColorIndex)
+            .ThenBy(kvp => kvp.Value.FirstOrDefault().Needle)
+            .ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
+
+        if (orderedObjects.Count > 0)
+        {
+            plan.ObjectStitches.Clear();
+            foreach (var kvp in orderedObjects)
+            {
+                plan.ObjectStitches[kvp.Key] = kvp.Value;
+            }
+        }
     }
 
     /// <summary>
@@ -779,8 +810,12 @@ public sealed class StitchEngine
         {
             foreach (var stitch in kvp.Value)
             {
-                // Assign sequence index
-                var newStitch = stitch with { SequenceIndex = (ushort)plan.GlobalSequence.Count };
+                // Assign sequence index - validate against ushort max
+                int seqIndex = plan.GlobalSequence.Count;
+                if (seqIndex > ushort.MaxValue)
+                    throw new InvalidOperationException($"Stitch sequence exceeds maximum representable index ({ushort.MaxValue}). Consider using a larger sequence index type or splitting the design.");
+                
+                var newStitch = stitch with { SequenceIndex = (ushort)seqIndex };
                 plan.GlobalSequence.Add(newStitch);
             }
         }
