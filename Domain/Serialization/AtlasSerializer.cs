@@ -136,128 +136,137 @@ public static class AtlasSerializer
 }
 
 /// <summary>
-/// Serializador binario compacto para planes de puntada (transferencia a máquina)
-/// </summary>
-public static class BinaryStitchSerializer
-{
-    // Magic bytes: "ATB1"
-    private static readonly byte[] Magic = { 0x41, 0x54, 0x42, 0x31 };
-    private const ushort Version = 1;
-
-    /// <summary>
-    /// Serializa StitchPlan a formato binario compacto
+    /// Serializador binario compacto para planes de puntada (transferencia a máquina)
     /// </summary>
-    public static byte[] Serialize(StitchPlan plan)
+    public static class BinaryStitchSerializer
     {
-        using var ms = new MemoryStream();
-        using var bw = new BinaryWriter(ms, Encoding.UTF8, leaveOpen: true);
+        // Magic bytes: "ATB1"
+        private static readonly byte[] Magic = { 0x41, 0x54, 0x42, 0x31 };
+        private const ushort Version = 1;
 
-        // Header
-        bw.Write(Magic);
-        bw.Write(Version);
-        bw.Write(plan.ProjectId.ToByteArray());
-        bw.Write(plan.ProjectName ?? "");
-        bw.Write(plan.CompiledAt.ToBinary());
-        bw.Write(plan.CanvasWidth);
-        bw.Write(plan.CanvasHeight);
-        bw.Write(plan.CanvasOrigin.X);
-        bw.Write(plan.CanvasOrigin.Y);
+        // CORRECCIÓN 4: Budget global del binario
+        private const int MAX_BINARY_DOCUMENT_BYTES = 50_000_000; // 50 MB máximo
 
-        // Paleta de hilos
-        bw.Write(plan.ThreadPalette.Count);
-        foreach (var color in plan.ThreadPalette)
+        /// <summary>
+        /// Serializa StitchPlan a formato binario compacto
+        /// </summary>
+        public static byte[] Serialize(StitchPlan plan)
         {
-            bw.Write(color.R);
-            bw.Write(color.G);
-            bw.Write(color.B);
-            bw.Write(color.Brand ?? "");
-            bw.Write(color.Code ?? "");
-            bw.Write(color.Name ?? "");
-            bw.Write(color.Description ?? "");
+            using var ms = new MemoryStream();
+            using var bw = new BinaryWriter(ms, Encoding.UTF8, leaveOpen: true);
+
+            // Header
+            bw.Write(Magic);
+            bw.Write(Version);
+            bw.Write(plan.ProjectId.ToByteArray());
+            bw.Write(plan.ProjectName ?? "");
+            bw.Write(plan.CompiledAt.ToBinary());
+            bw.Write(plan.CanvasWidth);
+            bw.Write(plan.CanvasHeight);
+            bw.Write(plan.CanvasOrigin.X);
+            bw.Write(plan.CanvasOrigin.Y);
+
+            // Paleta de hilos
+            bw.Write(plan.ThreadPalette.Count);
+            foreach (var color in plan.ThreadPalette)
+            {
+                bw.Write(color.R);
+                bw.Write(color.G);
+                bw.Write(color.B);
+                bw.Write(color.Brand ?? "");
+                bw.Write(color.Code ?? "");
+                bw.Write(color.Name ?? "");
+                bw.Write(color.Description ?? "");
+            }
+
+            // Color -> Needle map
+            bw.Write(plan.ColorToNeedleMap.Count);
+            foreach (var kvp in plan.ColorToNeedleMap)
+            {
+                bw.Write(kvp.Key);
+                bw.Write(kvp.Value);
+            }
+
+            // Machine profile (simplificado)
+            if (plan.MachineProfile != null)
+            {
+                bw.Write(true);
+                bw.Write(plan.MachineProfile.Id.ToByteArray());
+                bw.Write(plan.MachineProfile.Name ?? "");
+                bw.Write(plan.MachineProfile.MaxWidth);
+                bw.Write(plan.MachineProfile.MaxHeight);
+                bw.Write(plan.MachineProfile.NeedleCount);
+                bw.Write(plan.MachineProfile.MaxStitchLength);
+                bw.Write(plan.MachineProfile.MaxJumpLength);
+            }
+            else
+            {
+                bw.Write(false);
+            }
+
+            // Hoop profile
+            if (plan.HoopProfile != null)
+            {
+                bw.Write(true);
+                bw.Write(plan.HoopProfile.Id.ToByteArray());
+                bw.Write(plan.HoopProfile.Name ?? "");
+                bw.Write(plan.HoopProfile.Width);
+                bw.Write(plan.HoopProfile.Height);
+                bw.Write(plan.HoopProfile.UsableWidth);
+                bw.Write(plan.HoopProfile.UsableHeight);
+            }
+            else
+            {
+                bw.Write(false);
+            }
+
+            // Puntadas globales (secuencia aplanada)
+            var allStitches = plan.GetAllStitches();
+            bw.Write(allStitches.Count);
+
+            // CORRECCIÓN 4: Budget check en serialización
+            // Estimar tamaño mínimo del documento
+            long estimatedSize = ms.Position + (long)allStitches.Count * 9 + 500; // 9 bytes/stitch + métricas
+            if (estimatedSize > MAX_BINARY_DOCUMENT_BYTES)
+                throw new InvalidOperationException($"Document exceeds maximum size: {estimatedSize} > {MAX_BINARY_DOCUMENT_BYTES}");
+
+            // Escribir puntadas en formato compacto
+            // Deltas relativos para compresión
+            int lastX = 0, lastY = 0;
+            foreach (var stitch in allStitches)
+            {
+                int deltaX = stitch.X - lastX;
+                int deltaY = stitch.Y - lastY;
+
+                // Varint encoding para deltas pequeños
+                WriteVarInt(bw, deltaX);
+                WriteVarInt(bw, deltaY);
+                bw.Write((byte)stitch.Type);
+                bw.Write(stitch.Needle);
+                bw.Write(stitch.ColorIndex);
+                bw.Write(stitch.Flags);
+                bw.Write(stitch.SequenceIndex); // Version 1+
+
+                lastX = stitch.X;
+                lastY = stitch.Y;
+            }
+
+            // Métricas
+            bw.Write(plan.TotalStitches);
+            bw.Write(plan.TotalJumps);
+            bw.Write(plan.TotalTrims);
+            bw.Write(plan.TotalColorChanges);
+            bw.Write(plan.TotalStops);
+            bw.Write(plan.EstimatedTimeSeconds);
+            bw.Write(plan.EstimatedThreadMeters);
+            bw.Write(plan.DesignBounds.X);
+            bw.Write(plan.DesignBounds.Y);
+            bw.Write(plan.DesignBounds.Width);
+            bw.Write(plan.DesignBounds.Height);
+
+            bw.Flush();
+            return ms.ToArray();
         }
-
-        // Color -> Needle map
-        bw.Write(plan.ColorToNeedleMap.Count);
-        foreach (var kvp in plan.ColorToNeedleMap)
-        {
-            bw.Write(kvp.Key);
-            bw.Write(kvp.Value);
-        }
-
-        // Machine profile (simplificado)
-        if (plan.MachineProfile != null)
-        {
-            bw.Write(true);
-            bw.Write(plan.MachineProfile.Id.ToByteArray());
-            bw.Write(plan.MachineProfile.Name ?? "");
-            bw.Write(plan.MachineProfile.MaxWidth);
-            bw.Write(plan.MachineProfile.MaxHeight);
-            bw.Write(plan.MachineProfile.NeedleCount);
-            bw.Write(plan.MachineProfile.MaxStitchLength);
-            bw.Write(plan.MachineProfile.MaxJumpLength);
-        }
-        else
-        {
-            bw.Write(false);
-        }
-
-        // Hoop profile
-        if (plan.HoopProfile != null)
-        {
-            bw.Write(true);
-            bw.Write(plan.HoopProfile.Id.ToByteArray());
-            bw.Write(plan.HoopProfile.Name ?? "");
-            bw.Write(plan.HoopProfile.Width);
-            bw.Write(plan.HoopProfile.Height);
-            bw.Write(plan.HoopProfile.UsableWidth);
-            bw.Write(plan.HoopProfile.UsableHeight);
-        }
-        else
-        {
-            bw.Write(false);
-        }
-
-        // Puntadas globales (secuencia aplanada)
-        var allStitches = plan.GetAllStitches();
-        bw.Write(allStitches.Count);
-
-        // Escribir puntadas en formato compacto
-        // Deltas relativos para compresión
-        int lastX = 0, lastY = 0;
-        foreach (var stitch in allStitches)
-        {
-            int deltaX = stitch.X - lastX;
-            int deltaY = stitch.Y - lastY;
-
-            // Varint encoding para deltas pequeños
-            WriteVarInt(bw, deltaX);
-            WriteVarInt(bw, deltaY);
-            bw.Write((byte)stitch.Type);
-            bw.Write(stitch.Needle);
-            bw.Write(stitch.ColorIndex);
-            bw.Write(stitch.Flags);
-            bw.Write(stitch.SequenceIndex); // Version 1+
-
-            lastX = stitch.X;
-            lastY = stitch.Y;
-        }
-
-        // Métricas
-        bw.Write(plan.TotalStitches);
-        bw.Write(plan.TotalJumps);
-        bw.Write(plan.TotalTrims);
-        bw.Write(plan.TotalColorChanges);
-        bw.Write(plan.TotalStops);
-        bw.Write(plan.EstimatedTimeSeconds);
-        bw.Write(plan.EstimatedThreadMeters);
-        bw.Write(plan.DesignBounds.X);
-        bw.Write(plan.DesignBounds.Y);
-        bw.Write(plan.DesignBounds.Width);
-        bw.Write(plan.DesignBounds.Height);
-
-        bw.Flush();
-        return ms.ToArray();
-    }
 
     /// <summary>
     /// Deserializa plan binario
@@ -344,11 +353,13 @@ public static class BinaryStitchSerializer
             int stitchCount = br.ReadInt32();
             if (stitchCount < 0 || stitchCount > 10000000) return null; // 10M max
             
-            // Budget check: estimación conservadora de bytes mínimos por puntada (deltaX, deltaY, type, needle, colorIndex, flags, sequenceIndex)
-            // Cada VarInt mínimo 1 byte, type/needle/colorIndex = 1 byte cada uno, flags/sequenceIndex = 2 bytes cada uno = 9 bytes mínimos
+            // Budget check: estimación conservadora de bytes mínimos por puntada
             long minBytesNeeded = (long)stitchCount * 9;
             long remainingBytes = ms.Length - ms.Position;
             if (remainingBytes < minBytesNeeded) return null; // Archivo truncado o count inflado
+
+            // CORRECCIÓN 4: Check global document size budget
+            if (ms.Length > MAX_BINARY_DOCUMENT_BYTES) return null;
 
             var stitches = new List<StitchPoint>(stitchCount);
             int lastX = 0, lastY = 0;
@@ -388,6 +399,22 @@ public static class BinaryStitchSerializer
             if (ms.Position != ms.Length)
                 return null; // Datos trailing no permitidos
 
+            // CORRECCIÓN 5: Validación de métricas binarias
+            if (plan.TotalStitches < 0 || plan.TotalJumps < 0 || plan.TotalTrims < 0 || 
+                plan.TotalColorChanges < 0 || plan.TotalStops < 0)
+                return null;
+
+            if (!double.IsFinite(plan.EstimatedTimeSeconds) || !double.IsFinite(plan.EstimatedThreadMeters) ||
+                plan.EstimatedTimeSeconds < 0 || plan.EstimatedThreadMeters < 0)
+                return null;
+
+            // CORRECCIÓN 6: Consistencia de métricas - TotalStitches no debe exceder stitchCount
+            // stitchCount incluye todas las puntadas serializadas (incluyendo jumps, trims, tie-in, tie-off, underlay)
+            // TotalStitches es el contador de puntadas de costura "reales"
+            // Validación: TotalStitches <= stitchCount
+            if (plan.TotalStitches > stitchCount)
+                return null;
+
             return plan;
         }
         catch (EndOfStreamException)
@@ -398,15 +425,12 @@ public static class BinaryStitchSerializer
         {
             return null; // Datos de formato inválido
         }
-        catch (Exception)
-        {
-            // CORRECCIÓN 3: Solo capturar excepciones de formato conocidas, no ocultar bugs de programación
-            return null; // Datos corruptos
-        }
+        // CORRECCIÓN 1: Eliminado catch (Exception) genérico - bugs internos deben propagarse
     }
 
     /// <summary>
     /// Lee string con validación explícita de longitud ANTES de materializar (CORRECCIÓN 2)
+    /// UTF-8 estricto con DecoderFallback.ExceptionFallback (CORRECCIÓN 2)
     /// </summary>
     private static string ReadStringSafe(BinaryReader br)
     {
@@ -426,7 +450,7 @@ public static class BinaryStitchSerializer
                 shift += 7;
             } while ((b & 0x80) != 0);
 
-            // Validar longitud
+            // Validar longitud ANTES de allocation (CORRECCIÓN 3)
             const int MAX_STRING_BYTES = 10000;
             if (length < 0 || length > MAX_STRING_BYTES)
                 throw new InvalidDataException($"Invalid string length: {length}");
@@ -441,8 +465,11 @@ public static class BinaryStitchSerializer
             if (bytes.Length != length)
                 throw new EndOfStreamException("Premature end of stream reading string");
 
-            // Decodificar UTF-8
-            return Encoding.UTF8.GetString(bytes);
+            // CORRECCIÓN 2: UTF-8 estricto - rechazar secuencias inválidas
+            var decoder = Encoding.UTF8.GetDecoder();
+            // Usar decoder con ExceptionFallback para rechazar UTF-8 inválido
+            var encoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+            return encoding.GetString(bytes);
         }
         catch (EndOfStreamException)
         {
@@ -451,6 +478,10 @@ public static class BinaryStitchSerializer
         catch (InvalidDataException)
         {
             throw; // Propagar
+        }
+        catch (DecoderFallbackException)
+        {
+            throw new InvalidDataException("Invalid UTF-8 sequence in string");
         }
         catch (Exception)
         {

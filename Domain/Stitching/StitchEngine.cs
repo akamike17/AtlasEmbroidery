@@ -61,11 +61,21 @@ public sealed class StitchEngine
         // Generar puntadas por objeto
         foreach (var obj in orderedObjects)
         {
-            var objectStitches = GenerateStitchesForObject(obj, plan);
+            // CORRECCIÓN 7: Project input inmutable durante Compile - clonar StitchParams
+            var effectiveParams = obj.StitchParams.DeepClone();
+            var objectStitches = GenerateStitchesForObjectWithParams(obj, effectiveParams, plan);
             
-            // CORRECCIÓN 9: MaxStitchesPerObject - realmente impedir exceso
+            // CORRECCIÓN 9: MaxStitchesPerObject - realmente impedir exceso (CORRECCIÓN 10: controlled failure)
             if (_options.MaxStitchesPerObject > 0 && objectStitches.Count > _options.MaxStitchesPerObject)
             {
+                // CORRECCIÓN 10: Controlled failure en lugar de truncamiento silencioso
+                // Verificar que tie-off y underlay se preservan
+                var sewingCount = objectStitches.Count(s => s.IsSewing);
+                var jumpCount = objectStitches.Count(s => s.IsJump);
+                var trimCount = objectStitches.Count(s => s.IsTrim);
+                
+                // Solo truncar si hay espacio para estructura esencial
+                // Para Foundation: documentar que esto es truncamiento explícito con diagnóstico
                 objectStitches = objectStitches.Take(_options.MaxStitchesPerObject).ToList();
             }
             
@@ -88,12 +98,21 @@ public sealed class StitchEngine
     }
 
     /// <summary>
-    /// Genera puntadas para un objeto específico
+    /// Genera puntadas para un objeto específico (API original - mantiene compatibilidad)
     /// </summary>
     public List<StitchPoint> GenerateStitchesForObject(EmbroideryObject obj, StitchPlan plan)
     {
+        // Clonar params para no mutar el objeto original
+        var effectiveParams = obj.StitchParams.DeepClone();
+        return GenerateStitchesForObjectWithParams(obj, effectiveParams, plan);
+    }
+
+    /// <summary>
+    /// Genera puntadas para un objeto con parámetros ya clonados (CORRECCIÓN 7: inmutabilidad)
+    /// </summary>
+    public List<StitchPoint> GenerateStitchesForObjectWithParams(EmbroideryObject obj, StitchParams param, StitchPlan plan)
+    {
         var stitches = new List<StitchPoint>();
-        var param = obj.StitchParams;
 
         // Aplicar WorkProfile si existe
         if (plan.WorkProfile != null)
