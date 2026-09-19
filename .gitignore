@@ -1,0 +1,34 @@
+# Build outputs
+bin/
+obj/
+out/
+
+# IDE/Editor
+.vs/
+*.suo
+*.user
+*.slnx
+
+# Test results
+Tests/**/TestResults/
+
+# Debug serializer test project (temporary)
+Tests/DebugSerializer/
+
+# NuGet
+*.nupkg
+packages/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Coverage reports (keep source, ignore generated)
+*.cobertura.xml
+
+# Build artifacts
+*.dll
+*.exe
+*.pdb
+*.deps.json
+*.runtimeconfig.json
