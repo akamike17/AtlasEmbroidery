@@ -152,6 +152,7 @@ public sealed class StitchPointJsonConverter : JsonConverter<StitchPoint>
         StitchType type = StitchType.Running;
         byte needle = 1, colorIndex = 0;
         ushort flags = 0;
+        ushort sequenceIndex = 0;
 
         while (reader.Read())
         {
@@ -169,9 +170,10 @@ public sealed class StitchPointJsonConverter : JsonConverter<StitchPoint>
                 case "needle": needle = (byte)reader.GetInt32(); break;
                 case "colorindex": colorIndex = (byte)reader.GetInt32(); break;
                 case "flags": flags = (ushort)reader.GetInt32(); break;
+                case "sequenceindex": sequenceIndex = (ushort)reader.GetInt32(); break;
             }
         }
-        return new StitchPoint(x, y, type, needle, colorIndex, flags);
+        return new StitchPoint(x, y, type, needle, colorIndex, flags, sequenceIndex);
     }
 
     public override void Write(Utf8JsonWriter writer, StitchPoint value, JsonSerializerOptions options)
@@ -183,6 +185,7 @@ public sealed class StitchPointJsonConverter : JsonConverter<StitchPoint>
         writer.WriteNumber("needle", value.Needle);
         writer.WriteNumber("colorIndex", value.ColorIndex);
         if (value.Flags != 0) writer.WriteNumber("flags", value.Flags);
+        if (value.SequenceIndex != 0) writer.WriteNumber("sequenceIndex", value.SequenceIndex);
         writer.WriteEndObject();
     }
 }

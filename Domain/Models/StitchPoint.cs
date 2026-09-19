@@ -10,7 +10,8 @@ public readonly record struct StitchPoint(
     StitchType Type = StitchType.Running,
     byte Needle = 1,
     byte ColorIndex = 0,
-    ushort Flags = 0)
+    ushort Flags = 0,
+    ushort SequenceIndex = 0)
 {
     public static readonly StitchPoint Empty = new(int.MinValue, int.MinValue, StitchType.End);
 

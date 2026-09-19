@@ -236,6 +236,7 @@ public static class BinaryStitchSerializer
             bw.Write(stitch.Needle);
             bw.Write(stitch.ColorIndex);
             bw.Write(stitch.Flags);
+            bw.Write(stitch.SequenceIndex); // Version 1+
 
             lastX = stitch.X;
             lastY = stitch.Y;
@@ -344,11 +345,12 @@ public static class BinaryStitchSerializer
             byte needle = br.ReadByte();
             byte colorIndex = br.ReadByte();
             ushort flags = br.ReadUInt16();
+            ushort sequenceIndex = br.ReadUInt16(); // Version 1+
 
             int x = lastX + deltaX;
             int y = lastY + deltaY;
 
-            stitches.Add(new StitchPoint(x, y, type, needle, colorIndex, flags));
+            stitches.Add(new StitchPoint(x, y, type, needle, colorIndex, flags, sequenceIndex));
             lastX = x;
             lastY = y;
         }
