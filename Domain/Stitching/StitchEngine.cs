@@ -51,10 +51,24 @@ public sealed class StitchEngine
                 .ToList();
         }
 
+        // CORRECCIÓN 9: Aplicar opciones del StitchEngine
+        // MaxStitchesPerObject: límite por objeto
+        // EnableUnderlay: controla underlay
+        // EnableOptimization: controla optimización
+        // EnableAutoTrim: controla trim automático
+        // RandomSeed: documentado como sin efecto actual (no hay aleatoriedad)
+
         // Generar puntadas por objeto
         foreach (var obj in orderedObjects)
         {
             var objectStitches = GenerateStitchesForObject(obj, plan);
+            
+            // CORRECCIÓN 9: MaxStitchesPerObject - realmente impedir exceso
+            if (_options.MaxStitchesPerObject > 0 && objectStitches.Count > _options.MaxStitchesPerObject)
+            {
+                objectStitches = objectStitches.Take(_options.MaxStitchesPerObject).ToList();
+            }
+            
             plan.ObjectStitches[obj.Id] = objectStitches;
             plan.TotalStitches += objectStitches.Count(s => s.IsSewing);
             plan.TotalJumps += objectStitches.Count(s => s.IsJump);
@@ -62,7 +76,10 @@ public sealed class StitchEngine
         }
 
         // Post-procesamiento: optimizar saltos, trims, etc.
-        OptimizePlan(plan);
+        if (_options.EnableOptimization)
+        {
+            OptimizePlan(plan);
+        }
 
         // Calcular métricas finales
         CalculateMetrics(plan);
@@ -105,24 +122,27 @@ public sealed class StitchEngine
                 break;
         }
 
-        // Aplicar underlay si corresponde
-        if (param.Underlay != null && param.Underlay.Enabled)
+        // Aplicar underlay si corresponde (CORRECCIÓN 9: EnableUnderlay controla si se ejecuta)
+        if (_options.EnableUnderlay && param.Underlay != null && param.Underlay.Enabled)
         {
             var underlayStitches = GenerateUnderlay(obj, param.Underlay, plan);
             // Underlay va ANTES que puntada principal
             stitches.InsertRange(0, underlayStitches);
         }
 
-        // Agregar tie-in/tie-off
-        if (param.UseTieIn && stitches.Count > 0)
+        // Agregar tie-in/tie-off (CORRECCIÓN 9: EnableAutoTrim controla trim automático)
+        if (_options.EnableAutoTrim)
         {
-            var tieIn = GenerateTieIn(stitches[0], param);
-            stitches.InsertRange(0, tieIn);
-        }
-        if (param.UseTieOff && stitches.Count > 0)
-        {
-            var tieOff = GenerateTieOff(stitches[^1], param);
-            stitches.AddRange(tieOff);
+            if (param.UseTieIn && stitches.Count > 0)
+            {
+                var tieIn = GenerateTieIn(stitches[0], param);
+                stitches.InsertRange(0, tieIn);
+            }
+            if (param.UseTieOff && stitches.Count > 0)
+            {
+                var tieOff = GenerateTieOff(stitches[^1], param);
+                stitches.AddRange(tieOff);
+            }
         }
 
         // Marcar sequence order
@@ -366,23 +386,23 @@ public sealed class StitchEngine
     /// </summary>
     private List<StitchPoint> GenerateSatinStitches(List<Point> vertices, StitchParams param, StitchPlan plan)
     {
-        // Placeholder - implementación completa requiere:
-        // 1. Calcular centroides / skeleton
-        // 2. Generar líneas de columna perpendiculares al ángulo
-        // 3. Recortar a límites de forma
-        // 4. Alternar dirección (serpentine)
-        // 5. Manejar esquinas (mitered, capped, rounded)
-
         var stitches = new List<StitchPoint>();
         var satinParam = param.Satin ?? new SatinParams();
+
+        // CORRECCIÓN 13: Validar parámetros Satin
+        int columnWidth = satinParam.ColumnWidth;
+        if (columnWidth <= 0) columnWidth = satinParam.MinColumnWidth > 0 ? satinParam.MinColumnWidth : 500;
+        if (columnWidth > satinParam.MaxColumnWidth) columnWidth = satinParam.MaxColumnWidth;
+
+        int spacing = param.SatinSpacing;
+        if (spacing <= 0) spacing = 200; // Default 0.2mm
+
+        // Validar path count
+        if (vertices.Count < 2) return stitches;
 
         // Implementación simplificada: bounding box + líneas paralelas
         var bounds = GeometryUtils.BoundingBox(vertices);
         double angleRad = param.Angle / 10.0 * Math.PI / 180.0;
-        int spacing = param.SatinSpacing;
-        
-        // Validate spacing to prevent division by zero
-        if (spacing <= 0) spacing = 200; // Default 0.2mm
 
         // Rotar vértices para alinear con ángulo 0
         var center = bounds.Center;
@@ -440,10 +460,13 @@ public sealed class StitchEngine
         var stitches = new List<StitchPoint>();
         var tatamiParam = param.Tatami ?? new TatamiParams();
 
-        // Validate parameters
+        // CORRECCIÓN 14: Validar parámetros Tatami
         if (param.Density <= 0) param.Density = 400;
         int rowSpacing = tatamiParam.RowSpacing > 0 ? tatamiParam.RowSpacing : param.Density;
         if (rowSpacing <= 0) rowSpacing = param.Density;
+
+        // Validar polígono mínimo
+        if (vertices.Count < 3) return stitches; // Necesita al menos 3 puntos para un área
 
         // Bounding box
         var bounds = GeometryUtils.BoundingBox(vertices);
@@ -464,6 +487,14 @@ public sealed class StitchEngine
             int y = startY + row * rowSpacing;
             var intersections = FindPolygonIntersections(rotatedVertices, y, horizontal: true);
             intersections.Sort((a, b) => a.X.CompareTo(b.X));
+
+            // CORRECCIÓN 14: Manejar intersecciones impares (no asumir paridad)
+            if (intersections.Count < 2) continue;
+            if (intersections.Count % 2 != 0)
+            {
+                // Intersección impar - posible geometría degenerada, omitir última intersección
+                intersections.RemoveAt(intersections.Count - 1);
+            }
 
             // Offset alternado para patrón ladrillo
             double offset = 0;
@@ -670,14 +701,22 @@ public sealed class StitchEngine
     {
         var stitches = new List<StitchPoint>();
         
-        // Protect against division by zero
+        // CORRECCIÓN 15: Validar parámetros de tie-in/tie-off
         int tieStitchCount = Math.Max(1, param.TieStitchCount);
+        int tieInLength = Math.Max(0, param.TieInLength);
+        int tieOffLength = Math.Max(0, param.TieOffLength);
         
+        // Evitar desplazamientos absurdos: si length < count, usar length como offset total
+        if (tieInLength < tieStitchCount && tieStitchCount > 0)
+        {
+            tieInLength = tieStitchCount;
+        }
+
         for (int i = 0; i < tieStitchCount; i++)
         {
             // Pequeños puntos hacia atrás
             double angle = Math.PI * 2 * i / tieStitchCount;
-            int offset = tieStitchCount > 0 ? param.TieInLength / tieStitchCount : param.TieInLength;
+            int offset = tieStitchCount > 0 ? tieInLength / tieStitchCount : tieInLength;
             int x = firstStitch.X + (int)Math.Round(Math.Cos(angle) * offset);
             int y = firstStitch.Y + (int)Math.Round(Math.Sin(angle) * offset);
             stitches.Add(new StitchPoint(x, y, StitchType.Running, (byte)param.NeedleIndex, (byte)param.ColorIndex)
@@ -693,13 +732,20 @@ public sealed class StitchEngine
     {
         var stitches = new List<StitchPoint>();
         
-        // Protect against division by zero
+        // CORRECCIÓN 15: Validar parámetros de tie-in/tie-off
         int tieStitchCount = Math.Max(1, param.TieStitchCount);
+        int tieOffLength = Math.Max(0, param.TieOffLength);
         
+        // Evitar desplazamientos absurdos
+        if (tieOffLength < tieStitchCount && tieStitchCount > 0)
+        {
+            tieOffLength = tieStitchCount;
+        }
+
         for (int i = 0; i < tieStitchCount; i++)
         {
             double angle = Math.PI * 2 * i / tieStitchCount;
-            int offset = tieStitchCount > 0 ? param.TieOffLength / tieStitchCount : param.TieOffLength;
+            int offset = tieStitchCount > 0 ? tieOffLength / tieStitchCount : tieOffLength;
             int x = lastStitch.X + (int)Math.Round(Math.Cos(angle) * offset);
             int y = lastStitch.Y + (int)Math.Round(Math.Sin(angle) * offset);
             stitches.Add(new StitchPoint(x, y, StitchType.Running, (byte)param.NeedleIndex, (byte)param.ColorIndex)
@@ -805,8 +851,9 @@ public sealed class StitchEngine
     private void CalculateMetrics(StitchPlan plan)
     {
         // Aplanar todas las puntadas a la secuencia global
+        // CORRECCIÓN 10: Usar el orden actual de ObjectStitches (ya optimizado por OptimizePlan)
         plan.GlobalSequence.Clear();
-        foreach (var kvp in plan.ObjectStitches.OrderBy(k => k.Key))
+        foreach (var kvp in plan.ObjectStitches) // Sin OrderBy para preservar orden de optimización
         {
             foreach (var stitch in kvp.Value)
             {
@@ -828,6 +875,9 @@ public sealed class StitchEngine
 
         // Estimar tiempo (stitches/min)
         int speed = plan.WorkProfile?.RecommendedMaxSpeed ?? 800;
+        // CORRECCIÓN 8: Validar velocidad
+        if (speed <= 0)
+            throw new InvalidOperationException($"Invalid speed: {speed}. Speed must be positive.");
         plan.EstimatedTimeSeconds = plan.TotalStitches * 60.0 / speed;
 
         // Estimar hilo (aprox 0.5mm por puntada = 0.0005m)

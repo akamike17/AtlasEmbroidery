@@ -27,13 +27,72 @@ public class FoundationHardeningTests
     }
 
     [Fact]
-    public void SequenceIndex_Overflow_ThrowsOnLargeDesign()
+    public void SequenceIndex_Overflow_ThrowsOnExceedingUshortMax()
     {
-        // This test verifies the overflow check exists - it would require a massive design to trigger
-        // For now, verify the check logic is in place by inspecting the compiled code
+        // CORRECCIÓN 7: Test real que provoca overflow
+        // Crear un plan con 65537 puntadas (ushort.MaxValue + 2)
+        var plan = new StitchPlan
+        {
+            ProjectId = Guid.NewGuid(),
+            ProjectName = "OverflowTest",
+            CanvasWidth = 100000,
+            CanvasHeight = 100000
+        };
+
+        var stitches = new List<StitchPoint>();
+        // Crear 65537 puntadas (ushort.MaxValue + 2) para forzar overflow
+        // seqIndex va de 0 a 65536, cuando intente asignar 65536 (>= 65536) debe fallar
+        for (int i = 0; i <= ushort.MaxValue + 1; i++)
+        {
+            stitches.Add(new StitchPoint(i, i, StitchType.Running, 1, 0, 0, 0));
+        }
+        plan.ObjectStitches[Guid.NewGuid()] = stitches;
+
+        var engine = new StitchEngine();
+        
+        // CalculateMetrics se llama internamente y debe lanzar excepción
         var method = typeof(StitchEngine).GetMethod("CalculateMetrics", 
             BindingFlags.NonPublic | BindingFlags.Instance);
-        method.Should().NotBeNull("CalculateMetrics method should exist for sequence index assignment");
+        method.Should().NotBeNull();
+        
+        // Llamar directamente - la excepción debe propagarse
+        Action act = () => method!.Invoke(engine, new object[] { plan });
+        act.Should().Throw<TargetInvocationException>()
+            .WithInnerException<InvalidOperationException>()
+            .Which.Message.Should().Contain("maximum representable index");
+    }
+
+    [Fact]
+    public void SequenceIndex_ExactlyUshortMax_Works()
+    {
+        // CORRECCIÓN 7: 65535 puntadas (ushort.MaxValue) debe ser válido
+        // indices 0..65534 = 65535 elementos
+        var plan = new StitchPlan
+        {
+            ProjectId = Guid.NewGuid(),
+            ProjectName = "MaxValidTest",
+            CanvasWidth = 100000,
+            CanvasHeight = 100000
+        };
+
+        var stitches = new List<StitchPoint>();
+        // Crear exactamente 65535 puntadas (ushort.MaxValue)
+        for (int i = 0; i < ushort.MaxValue; i++)
+        {
+            stitches.Add(new StitchPoint(i, i, StitchType.Running, 1, 0, 0, 0));
+        }
+        plan.ObjectStitches[Guid.NewGuid()] = stitches;
+
+        var engine = new StitchEngine();
+        
+        // No debe lanzar excepción
+        var method = typeof(StitchEngine).GetMethod("CalculateMetrics", 
+            BindingFlags.NonPublic | BindingFlags.Instance);
+        method.Should().NotBeNull();
+        method!.Invoke(engine, new object[] { plan });
+        
+        plan.GlobalSequence.Count.Should().Be(ushort.MaxValue);
+        plan.GlobalSequence.Last().SequenceIndex.Should().Be((ushort)(ushort.MaxValue - 1));
     }
 
     #endregion
@@ -87,6 +146,38 @@ public class FoundationHardeningTests
     }
 
     [Fact]
+    public void BinaryStitchSerializer_VersionZero_ReturnsNull()
+    {
+        // CORRECCIÓN 1: Version 0 debe rechazarse
+        var plan = CreateTestPlan();
+        var bytes = BinaryStitchSerializer.Serialize(plan);
+        
+        // Modify version to 0
+        var modified = bytes.ToArray();
+        modified[4] = 0x00; // Version 0
+        modified[5] = 0x00;
+        
+        var result = BinaryStitchSerializer.Deserialize(modified);
+        result.Should().BeNull();
+    }
+
+    [Fact]
+    public void BinaryStitchSerializer_VersionMaxValue_ReturnsNull()
+    {
+        // CORRECCIÓN 1: Version ushort.MaxValue debe rechazarse
+        var plan = CreateTestPlan();
+        var bytes = BinaryStitchSerializer.Serialize(plan);
+        
+        // Modify version to ushort.MaxValue
+        var modified = bytes.ToArray();
+        modified[4] = 0xFF; // ushort.MaxValue low byte
+        modified[5] = 0xFF; // ushort.MaxValue high byte
+        
+        var result = BinaryStitchSerializer.Deserialize(modified);
+        result.Should().BeNull();
+    }
+
+    [Fact]
     public void BinaryStitchSerializer_TruncatedData_ReturnsNull()
     {
         var plan = CreateTestPlan();
@@ -96,6 +187,25 @@ public class FoundationHardeningTests
         var truncated = bytes.Take(Math.Max(1, bytes.Length / 2)).ToArray();
         
         var result = BinaryStitchSerializer.Deserialize(truncated);
+        result.Should().BeNull();
+    }
+
+    [Fact]
+    public void BinaryStitchSerializer_TrailingGarbage_ReturnsNull()
+    {
+        // CORRECCIÓN 6: trailing garbage debe rechazarse
+        var plan = CreateTestPlan();
+        var bytes = BinaryStitchSerializer.Serialize(plan);
+        
+        // Add trailing garbage bytes
+        var withGarbage = new byte[bytes.Length + 10];
+        Array.Copy(bytes, withGarbage, bytes.Length);
+        for (int i = bytes.Length; i < withGarbage.Length; i++)
+        {
+            withGarbage[i] = 0xFF;
+        }
+        
+        var result = BinaryStitchSerializer.Deserialize(withGarbage);
         result.Should().BeNull();
     }
 
@@ -318,7 +428,50 @@ public class FoundationHardeningTests
         ex.InnerException.Should().BeOfType<EndOfStreamException>();
     }
 
-    #endregion
+    [Fact]
+    public void VarInt_FifthByteInvalidHighBits_ThrowsException()
+    {
+        // CORRECCIÓN 4: 5to byte con bits altos inválidos
+        // Para int32, el 5to byte solo puede tener los 4 bits bajos
+        // 0x8F = 10001111 - bits altos (0xF0) están seteados inválidamente
+        var corruptData = new byte[] { 0x80, 0x80, 0x80, 0x80, 0x8F };
+        
+        using var ms = new MemoryStream(corruptData);
+        using var br = new BinaryReader(ms);
+        
+        var readMethod = typeof(BinaryStitchSerializer).GetMethod("ReadVarInt",
+            BindingFlags.NonPublic | BindingFlags.Static);
+        readMethod.Should().NotBeNull();
+        
+        var ex = Assert.Throws<TargetInvocationException>(() => readMethod!.Invoke(null, new object[] { br }));
+        ex.InnerException.Should().BeOfType<InvalidDataException>();
+    }
+
+    [Fact]
+    public void VarInt_SixBytes_ThrowsException()
+    {
+        // CORRECCIÓN 4: 6+ bytes debe rechazarse
+        var corruptData = new byte[] { 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01 };
+        
+        using var ms = new MemoryStream(corruptData);
+        using var br = new BinaryReader(ms);
+        
+        var readMethod = typeof(BinaryStitchSerializer).GetMethod("ReadVarInt",
+            BindingFlags.NonPublic | BindingFlags.Static);
+        readMethod.Should().NotBeNull();
+        
+        var ex = Assert.Throws<TargetInvocationException>(() => readMethod!.Invoke(null, new object[] { br }));
+        ex.InnerException.Should().BeOfType<InvalidDataException>();
+    }
+
+    [Fact]
+    public void VarInt_MaxValidEncoding_RoundTrips()
+    {
+        // CORRECCIÓN 4: Máximo encoding válido para int32
+        // int.MaxValue en zigzag = 0xFFFFFFFE, encoded as 5 bytes
+        TestVarIntRoundTrip(int.MaxValue);
+        TestVarIntRoundTrip(int.MinValue);
+    }
 
     #region JSON Round-Trip Tests
 
@@ -661,14 +814,14 @@ public class FoundationHardeningTests
         var project = CreateTestProject();
         project.WorkProfile = new WorkProfile
         {
-            RecommendedMaxSpeed = 0 // Edge case
+            RecommendedMaxSpeed = 0 // Edge case - should throw
         };
         
         var engine = new StitchEngine();
-        var plan = engine.Compile(project);
         
-        // Should not crash, time should be reasonable (or infinite handled)
-        plan.EstimatedTimeSeconds.Should().BeGreaterOrEqualTo(0);
+        // CORRECCIÓN 8: speed <= 0 debe rechazarse explícitamente
+        var ex = Assert.Throws<InvalidOperationException>(() => engine.Compile(project));
+        ex.Message.Should().Contain("Invalid speed");
     }
 
     #endregion
@@ -871,6 +1024,68 @@ public class FoundationHardeningTests
         method.Should().NotBeNull();
     }
 
+    [Fact]
+    public void StitchEngine_OptimizePlan_ReordersObjectsByColorThenNeedle()
+    {
+        // CORRECCIÓN 11: Test real de optimización
+        var project = new AtlasProject
+        {
+            Name = "OptimizeTest",
+            CanvasWidth = 100000,
+            CanvasHeight = 100000
+        };
+
+        // Object A: color 2 (debería ir después)
+        var rectA = ShapeObject.CreateRectangle(new Rectangle(1000, 1000, 5000, 5000), "RectA");
+        rectA.StitchParams = StitchParams.DefaultFor(StitchType.Running);
+        rectA.StitchParams.ColorIndex = 2;
+        rectA.StitchParams.NeedleIndex = 1;
+        rectA.RecalculateBounds();
+        project.Objects.Add(rectA);
+
+        // Object B: color 1 (debería ir antes)
+        var rectB = ShapeObject.CreateRectangle(new Rectangle(20000, 20000, 5000, 5000), "RectB");
+        rectB.StitchParams = StitchParams.DefaultFor(StitchType.Satin);
+        rectB.StitchParams.ColorIndex = 1;
+        rectB.StitchParams.NeedleIndex = 1;
+        rectB.RecalculateBounds();
+        project.Objects.Add(rectB);
+
+        project.ThreadPalette.Add(new ThreadColor(255, 0, 0, "Brand", "R001", "Red"));    // color 0
+        project.ThreadPalette.Add(new ThreadColor(0, 255, 0, "Brand", "G001", "Green"));  // color 1
+        project.ThreadPalette.Add(new ThreadColor(0, 0, 255, "Brand", "B001", "Blue"));   // color 2
+        project.ColorToNeedleMap[0] = 1;
+        project.ColorToNeedleMap[1] = 1;
+        project.ColorToNeedleMap[2] = 1;
+
+        var engine = new StitchEngine();
+        var plan = engine.Compile(project);
+
+        plan.ObjectStitches.Should().HaveCount(2);
+        
+        // GlobalSequence debe reflejar el orden optimizado (color 1 antes que color 2)
+        var sequence = plan.GlobalSequence;
+        sequence.Should().NotBeEmpty();
+        
+        // Encontrar las primeras puntadas de cada color en la secuencia
+        var firstColor1 = sequence.FirstOrDefault(s => s.ColorIndex == 1);
+        var firstColor2 = sequence.FirstOrDefault(s => s.ColorIndex == 2);
+        
+        firstColor1.Should().NotBeNull("Color 1 should appear in sequence");
+        firstColor2.Should().NotBeNull("Color 2 should appear in sequence");
+        
+        // Color 1 debe aparecer antes que color 2
+        firstColor1!.SequenceIndex.Should().BeLessThan(firstColor2!.SequenceIndex,
+            "Optimized sequence should have color 1 before color 2");
+
+        // Determinismo: misma entrada -> misma secuencia optimizada
+        var plan2 = engine.Compile(project);
+        plan2.GlobalSequence.Should().Equal(plan.GlobalSequence, 
+            (a, b) => a.SequenceIndex == b.SequenceIndex && 
+                     a.ColorIndex == b.ColorIndex && 
+                     a.X == b.X && a.Y == b.Y);
+    }
+
     #endregion
 
     #region Helpers
@@ -931,5 +1146,7 @@ public class FoundationHardeningTests
         return plan;
     }
 }
+
+#endregion
 
 #endregion

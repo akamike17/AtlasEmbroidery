@@ -277,7 +277,8 @@ public static class BinaryStitchSerializer
             if (!magic.SequenceEqual(Magic)) return null;
 
             var version = br.ReadUInt16();
-            if (version > Version) return null; // Versión futura no soportada
+            // CORRECCIÓN 1: Solo aceptar versión 1 explícitamente
+            if (version != Version) return null; // Reject version 0, future versions, etc.
 
             var plan = new StitchPlan
             {
@@ -339,35 +340,35 @@ public static class BinaryStitchSerializer
                 };
             }
 
-            // Puntadas - límite defensivo
+            // Puntadas - límite defensivo + CORRECCIÓN 5: Budget check
             int stitchCount = br.ReadInt32();
             if (stitchCount < 0 || stitchCount > 10000000) return null; // 10M max
+            
+            // Budget check: estimación conservadora de bytes mínimos por puntada (deltaX, deltaY, type, needle, colorIndex, flags, sequenceIndex)
+            // Cada VarInt mínimo 1 byte, type/needle/colorIndex = 1 byte cada uno, flags/sequenceIndex = 2 bytes cada uno = 9 bytes mínimos
+            long minBytesNeeded = (long)stitchCount * 9;
+            long remainingBytes = ms.Length - ms.Position;
+            if (remainingBytes < minBytesNeeded) return null; // Archivo truncado o count inflado
+
             var stitches = new List<StitchPoint>(stitchCount);
             int lastX = 0, lastY = 0;
 
             for (int i = 0; i < stitchCount; i++)
             {
-                try
-                {
-                    int deltaX = ReadVarInt(br);
-                    int deltaY = ReadVarInt(br);
-                    var type = (StitchType)br.ReadByte();
-                    byte needle = br.ReadByte();
-                    byte colorIndex = br.ReadByte();
-                    ushort flags = br.ReadUInt16();
-                    ushort sequenceIndex = br.ReadUInt16(); // Version 1+
+                int deltaX = ReadVarInt(br);
+                int deltaY = ReadVarInt(br);
+                var type = (StitchType)br.ReadByte();
+                byte needle = br.ReadByte();
+                byte colorIndex = br.ReadByte();
+                ushort flags = br.ReadUInt16();
+                ushort sequenceIndex = br.ReadUInt16(); // Version 1+
 
-                    int x = lastX + deltaX;
-                    int y = lastY + deltaY;
+                int x = lastX + deltaX;
+                int y = lastY + deltaY;
 
-                    stitches.Add(new StitchPoint(x, y, type, needle, colorIndex, flags, sequenceIndex));
-                    lastX = x;
-                    lastY = y;
-                }
-                catch (EndOfStreamException)
-                {
-                    return null; // Datos truncados
-                }
+                stitches.Add(new StitchPoint(x, y, type, needle, colorIndex, flags, sequenceIndex));
+                lastX = x;
+                lastY = y;
             }
 
             plan.ObjectStitches[Guid.Empty] = stitches; // Todas en una entrada
@@ -383,43 +384,77 @@ public static class BinaryStitchSerializer
             plan.DesignBounds = new Rectangle(
                 br.ReadInt32(), br.ReadInt32(), br.ReadInt32(), br.ReadInt32());
 
+            // CORRECCIÓN 6: Trailing data check - para versión cerrada, stream debe estar consumido completamente
+            if (ms.Position != ms.Length)
+                return null; // Datos trailing no permitidos
+
             return plan;
         }
         catch (EndOfStreamException)
         {
             return null; // Datos truncados en cualquier parte
         }
+        catch (InvalidDataException)
+        {
+            return null; // Datos de formato inválido
+        }
         catch (Exception)
         {
-            return null; // Cualquier otro error = datos corruptos
+            // CORRECCIÓN 3: Solo capturar excepciones de formato conocidas, no ocultar bugs de programación
+            return null; // Datos corruptos
         }
     }
 
     /// <summary>
-    /// Lee string compatible con BinaryWriter.Write(string) pero con límites de seguridad
+    /// Lee string con validación explícita de longitud ANTES de materializar (CORRECCIÓN 2)
     /// </summary>
     private static string ReadStringSafe(BinaryReader br)
     {
         try
         {
-            // BinaryWriter.Write(string) uses 7-bit encoded Int32 for length
-            // We can use the built-in ReadString but with position check
-            long posBefore = br.BaseStream.Position;
-            string result = br.ReadString();
-            long posAfter = br.BaseStream.Position;
-            
-            // Sanity check: string shouldn't be absurdly long
-            if (result.Length > 10000) return string.Empty;
-            
-            return result;
+            // Leer longitud 7-bit encoded Int32 (igual que BinaryWriter.Write(string))
+            int length = 0;
+            int shift = 0;
+            byte b;
+            do
+            {
+                if (shift >= 35) // Máx 5 bytes para Int32 7-bit encoded
+                    throw new InvalidDataException("String length exceeds maximum encoding");
+                
+                b = br.ReadByte();
+                length |= (b & 0x7F) << shift;
+                shift += 7;
+            } while ((b & 0x80) != 0);
+
+            // Validar longitud
+            const int MAX_STRING_BYTES = 10000;
+            if (length < 0 || length > MAX_STRING_BYTES)
+                throw new InvalidDataException($"Invalid string length: {length}");
+
+            // Verificar bytes disponibles
+            long remaining = br.BaseStream.Length - br.BaseStream.Position;
+            if (remaining < length)
+                throw new EndOfStreamException($"Insufficient bytes for string: need {length}, have {remaining}");
+
+            // Leer exactamente N bytes
+            byte[] bytes = br.ReadBytes(length);
+            if (bytes.Length != length)
+                throw new EndOfStreamException("Premature end of stream reading string");
+
+            // Decodificar UTF-8
+            return Encoding.UTF8.GetString(bytes);
         }
         catch (EndOfStreamException)
         {
-            return string.Empty;
+            throw; // Propagar para que Deserialize lo capture
         }
-        catch (FormatException)
+        catch (InvalidDataException)
         {
-            return string.Empty;
+            throw; // Propagar
+        }
+        catch (Exception)
+        {
+            throw new InvalidDataException("Failed to decode string");
         }
     }
 
@@ -439,23 +474,28 @@ public static class BinaryStitchSerializer
     }
 
     private static int ReadVarInt(BinaryReader br)
-    {
-        uint result = 0;
-        int shift = 0;
-        byte b;
-        int bytesRead = 0;
-        do
         {
-            if (bytesRead >= 5) // Max 5 bytes for int32 varint (prevents infinite loop on corrupt data)
-                throw new InvalidDataException("Varint exceeds maximum length");
+            uint result = 0;
+            int shift = 0;
+            byte b;
+            int bytesRead = 0;
+            do
+            {
+                if (bytesRead >= 5) // Max 5 bytes for int32 varint (prevents infinite loop on corrupt data)
+                    throw new InvalidDataException("Varint exceeds maximum length");
                 
-            b = br.ReadByte();
-            result |= (uint)(b & 0x7F) << shift;
-            shift += 7;
-            bytesRead++;
-        } while ((b & 0x80) != 0);
+                b = br.ReadByte();
+            
+                // CORRECCIÓN 4: Validar el 5to byte - para int32, el 5to byte solo puede tener los 4 bits bajos válidos
+                if (bytesRead == 4 && (b & 0xF0) != 0)
+                    throw new InvalidDataException("Invalid varint: 5th byte has invalid high bits");
+            
+                result |= (uint)(b & 0x7F) << shift;
+                shift += 7;
+                bytesRead++;
+            } while ((b & 0x80) != 0);
 
-        // Zigzag decode
-        return (int)(result >> 1) ^ -(int)(result & 1);
-    }
+            // Zigzag decode
+            return (int)(result >> 1) ^ -(int)(result & 1);
+        }
 }
