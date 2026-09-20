@@ -4,16 +4,19 @@ using System.IO;
 using System.Xml.Linq;
 using AtlasEmbroidery.Domain.Models;
 using AtlasEmbroidery.Domain.Geometry;
-using AtlasEmbroidery.Domain.Formats.Dst;
+using AtlasEmbroidery.Domain.Formats;
+using FmtValidationIssue = AtlasEmbroidery.Domain.Formats.ValidationIssue;
+using FmtValidationSeverity = AtlasEmbroidery.Domain.Formats.ValidationSeverity;
+using System.Text;
 
 /// <summary>
 /// SVG Reader - Lee SVG y convierte a objetos de bordado
 /// Soporta: rect, circle, ellipse, path, polygon, polyline, line
 /// </summary>
-public sealed class SvgReader : IFormatAdapter
+public sealed class SvgReader : IEmbroideryFormatReader
 {
     public string FormatName => "SVG";
-    public string FileExtension => ".svg";
+    public string[] Extensions => new[] { ".svg", ".SVG" };
     public string MimeType => "image/svg+xml";
     public FormatCapabilities Capabilities => new()
     {
@@ -29,29 +32,88 @@ public sealed class SvgReader : IFormatAdapter
     /// <summary>
     /// Lee un archivo SVG y convierte a AtlasProject
     /// </summary>
-    public async Task<AtlasProject> ReadAsync(Stream stream, CancellationToken ct = default)
+    public async Task<AtlasProject> ReadAsync(Stream stream, FormatReadOptions? options = null, CancellationToken ct = default)
     {
+        options ??= new FormatReadOptions();
+        
         using var reader = new StreamReader(stream);
         var content = await reader.ReadToEndAsync(ct);
         
         return ParseSvg(content, ct);
     }
 
-    public Task WriteAsync(AtlasProject project, Stream stream, CancellationToken ct = default)
+    /// <summary>
+    /// Validates an SVG file stream (synchronous - implements IEmbroideryFormatReader)
+    /// </summary>
+    public FormatValidationResult Validate(Stream stream)
     {
-        throw new NotImplementedException("SVG writing not implemented yet");
+        return ValidateAsync(stream).GetAwaiter().GetResult();
     }
 
-    public AtlasProject Normalize(AtlasProject project) => project;
-
-    public Task<RoundTripResult> RoundTripTestAsync(Stream originalStream, CancellationToken ct = default)
+    /// <summary>
+    /// Validates an SVG file stream (async)
+    /// </summary>
+    public async Task<FormatValidationResult> ValidateAsync(Stream stream)
     {
-        throw new NotImplementedException();
+        var result = new FormatValidationResult 
+        { 
+            FormatName = FormatName,
+            IsValid = true,
+            Issues = new List<FmtValidationIssue>()
+        };
+
+        try
+        {
+            var originalPosition = stream.Position;
+            stream.Position = 0;
+            
+            using var reader = new StreamReader(stream);
+            var content = await reader.ReadToEndAsync();
+            
+            // Basic SVG validation
+            if (string.IsNullOrWhiteSpace(content))
+            {
+                result.IsValid = false;
+                result.Issues.Add(new FmtValidationIssue
+                {
+                    RuleId = "SVG.EMPTY_CONTENT",
+                    Severity = FmtValidationSeverity.Critical,
+                    Message = "SVG file is empty",
+                    Evidence = "File size: 0 or whitespace only",
+                    Recommendation = "Ensure file contains valid SVG content"
+                });
+            }
+            else if (!content.TrimStart().StartsWith("<svg", StringComparison.OrdinalIgnoreCase) && 
+                     !content.TrimStart().StartsWith("<?xml", StringComparison.OrdinalIgnoreCase))
+            {
+                result.IsValid = false;
+                result.Issues.Add(new FmtValidationIssue
+                {
+                    RuleId = "SVG.INVALID_ROOT",
+                    Severity = FmtValidationSeverity.Critical,
+                    Message = "SVG file does not start with svg or xml declaration",
+                    Evidence = $"First 50 chars: {content.Substring(0, Math.Min(50, content.Length))}",
+                    Recommendation = "Ensure file is a valid SVG format"
+                });
+            }
+
+            stream.Position = originalPosition;
+        }
+        catch (Exception ex)
+        {
+            result.IsValid = false;
+            result.Issues.Add(new FmtValidationIssue
+            {
+                RuleId = "SVG.VALIDATION_EXCEPTION",
+                Severity = FmtValidationSeverity.Critical,
+                Message = $"Validation failed with exception: {ex.Message}",
+                Evidence = ex.ToString(),
+                Recommendation = "File is not a valid SVG format"
+            });
+        }
+
+        return result;
     }
-
-    public List<SemanticDifference> SemanticDiff(AtlasProject a, AtlasProject b) => new();
-
-    public byte[] GenerateFuzzInput(int seed = 0) => Array.Empty<byte>();
 
     /// <summary>
     /// Parsea contenido SVG a AtlasProject
