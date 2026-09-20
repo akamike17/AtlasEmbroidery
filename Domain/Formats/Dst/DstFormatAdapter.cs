@@ -49,7 +49,7 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
     public async Task<AtlasProject> ReadAsync(Stream stream, FormatReadOptions? options = null, CancellationToken ct = default)
     {
         options ??= new FormatReadOptions();
-        
+
         using var reader = new BinaryReader(stream, Encoding.ASCII, leaveOpen: true);
 
         // Header DST: 512 bytes
@@ -69,7 +69,7 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
 
         // Parse header
         var project = ParseHeader(header);
-        
+
         // Check size limits
         if (options.MaxStitches > 0)
         {
@@ -102,7 +102,7 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
 
             // Parse DST stitch format
             var (dx, dy, flags) = DecodeStitch(b1, b2, b3);
-            
+
             currentX += dx;
             currentY += dy;
 
@@ -135,7 +135,7 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
 
         project.Objects.Add(shapeObj);
         project.ThreadPalette = GenerateDefaultPalette(colorIndex + 1);
-        
+
         // Update ColorToNeedleMap
         for (int i = 0; i <= colorIndex; i++)
         {
@@ -154,7 +154,7 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
     public async Task WriteAsync(AtlasProject project, Stream stream, FormatWriteOptions? options = null, CancellationToken ct = default)
     {
         options ??= new FormatWriteOptions();
-        
+
         using var writer = new BinaryWriter(stream, Encoding.ASCII, leaveOpen: true);
 
         // Compile to stitch plan
@@ -183,11 +183,11 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
             dy = Math.Clamp(dy, -Capabilities.MaxStitchLength, Capabilities.MaxStitchLength);
 
             byte flags = 0;
-            
+
             if (stitch.IsTrim) flags |= (byte)DstFlags.Trim;
             if (stitch.IsJump) flags |= (byte)DstFlags.Jump;
             if (stitch.IsStop) flags |= (byte)DstFlags.Stop;
-            
+
             // Color change detection
             if (stitch.ColorIndex != currentColor)
             {
@@ -251,7 +251,7 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
 
         normalized.RecalculateBounds();
         normalized.Touch();
-        
+
         return normalized;
     }
 
@@ -268,8 +268,8 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
     /// </summary>
     public async Task<FormatValidationResult> ValidateAsync(Stream stream)
     {
-        var result = new FormatValidationResult 
-        { 
+        var result = new FormatValidationResult
+        {
             FormatName = FormatName,
             IsValid = true,
             Issues = new List<FmtValidationIssue>()
@@ -279,9 +279,9 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
         {
             var originalPosition = stream.Position;
             stream.Position = 0;
-            
+
             using var reader = new BinaryReader(stream, Encoding.ASCII, leaveOpen: true);
-            
+
             // Check minimum size
             if (stream.Length < 512)
             {
@@ -299,7 +299,7 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
             }
 
             var header = reader.ReadBytes(512);
-            
+
             // Check magic bytes (DST files typically start with spaces or specific signature)
             // DST doesn't have a strong magic, but check for reasonable header
             var name = Encoding.ASCII.GetString(header, 2, 16).TrimEnd('\0', ' ');
@@ -363,7 +363,7 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
             stream.Position = 512;
             int validStitches = 0;
             int maxCheck = Math.Min(1000, (int)(stream.Length - 512) / 3);
-            
+
             for (int i = 0; i < maxCheck && stream.Position + 2 < stream.Length; i++)
             {
                 try
@@ -371,13 +371,13 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
                     byte b1 = reader.ReadByte();
                     byte b2 = reader.ReadByte();
                     byte b3 = reader.ReadByte();
-                    
+
                     // Check for end marker
                     if (b1 == 0xF3 && b2 == 0x00 && b3 == 0x00)
                         break;
-                    
+
                     var (dx, dy, flags) = DecodeStitch(b1, b2, b3);
-                    
+
                     // Check for reasonable stitch lengths
                     if (Math.Abs(dx) > 2047 || Math.Abs(dy) > 2047)
                     {
@@ -391,7 +391,7 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
                             Recommendation = "Stitch will be clamped during read"
                         });
                     }
-                    
+
                     validStitches++;
                 }
                 catch
@@ -407,7 +407,7 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
                     });
                 }
             }
-            
+
             result.DetectedCapabilities = Capabilities;
             stream.Position = originalPosition;
         }
@@ -432,8 +432,8 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
     /// </summary>
     public FormatValidationResult Validate(AtlasProject project, MachineProfile? machine = null, HoopProfile? hoop = null)
     {
-        var result = new FormatValidationResult 
-        { 
+        var result = new FormatValidationResult
+        {
             FormatName = FormatName,
             IsValid = true,
             Issues = new List<FmtValidationIssue>()
@@ -489,10 +489,10 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
         // Check stitch lengths
         var engine = new StitchEngine();
         var plan = engine.Compile(project);
-        
-        var longStitches = plan.GetAllStitches().Where(s => s.IsSewing && 
+
+        var longStitches = plan.GetAllStitches().Where(s => s.IsSewing &&
             Math.Max(Math.Abs(s.X), Math.Abs(s.Y)) > Capabilities.MaxStitchLength * 10).ToList();
-        
+
         if (longStitches.Count > 0)
         {
             result.Issues.Add(new FmtValidationIssue
@@ -510,8 +510,8 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
 
     public FormatValidationResult Validate(StitchPlan plan, MachineProfile? machine = null, HoopProfile? hoop = null)
     {
-        var result = new FormatValidationResult 
-        { 
+        var result = new FormatValidationResult
+        {
             FormatName = FormatName,
             IsValid = true,
             Issues = new List<FmtValidationIssue>()
@@ -535,7 +535,7 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
     }
 
     /// <summary>
-    /// Round-trip test: Read -> Write -> Read and compare
+    /// Round-trip test: Read -> Write -> Read and compare binary DST data
     /// </summary>
     public async Task<RoundTripResult> RoundTripTestAsync(Stream originalStream, CancellationToken ct = default)
     {
@@ -550,13 +550,19 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
             // Write to memory
             using var ms = new MemoryStream();
             await WriteAsync(project1, ms, null, ct);
+            var writtenBytes = ms.ToArray();
 
             // Read back
             ms.Position = 0;
             var project2 = await ReadAsync(ms, null, ct);
 
-            // Semantic diff
-            result.Differences = SemanticDiff(project1, project2);
+            // Write again to compare binary
+            using var ms2 = new MemoryStream();
+            await WriteAsync(project2, ms2, null, ct);
+            var reReadBytes = ms2.ToArray();
+
+            // Compare binary data (allowing for minor differences in padding)
+            result.Differences = CompareBinaryDst(writtenBytes, reReadBytes);
             result.Success = result.Differences.Count == 0;
         }
         catch (Exception ex)
@@ -568,17 +574,85 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
         return result;
     }
 
-    /// <summary>
-    /// Semantic diff entre dos proyectos
-    /// </summary>
-    public List<SemanticDifference> SemanticDiff(AtlasProject a, AtlasProject b)
+    private List<SemanticDifference> CompareBinaryDst(byte[] a, byte[] b)
     {
         var diffs = new List<SemanticDifference>();
 
-        // Compare stitch counts
+        // Compare header (first 512 bytes)
+        int headerLen = Math.Min(512, Math.Min(a.Length, b.Length));
+        for (int i = 0; i < headerLen; i++)
+        {
+            if (a[i] != b[i])
+            {
+                diffs.Add(new SemanticDifference
+                {
+                    Type = DifferenceType.Metadata,
+                    Description = $"Header byte differs at offset {i}: 0x{a[i]:X2} vs 0x{b[i]:X2}",
+                    ValueA = $"0x{a[i]:X2}",
+                    ValueB = $"0x{b[i]:X2}"
+                });
+            }
+        }
+
+        // Compare stitch data (after header, before end marker)
+        int dataStart = 512;
+        int aEnd = FindEndMarker(a, dataStart);
+        int bEnd = FindEndMarker(b, dataStart);
+
+        int aDataLen = aEnd - dataStart;
+        int bDataLen = bEnd - dataStart;
+
+        if (aDataLen != bDataLen)
+        {
+            diffs.Add(new SemanticDifference
+            {
+                Type = DifferenceType.StitchCount,
+                Description = $"Stitch data length differs: {aDataLen} vs {bDataLen} bytes",
+                ValueA = aDataLen.ToString(),
+                ValueB = bDataLen.ToString()
+            });
+        }
+
+        int minLen = Math.Min(aDataLen, bDataLen);
+        for (int i = 0; i < minLen; i += 3)
+        {
+            if (i + 2 < minLen && a[dataStart + i] != b[dataStart + i] ||
+                a[dataStart + i + 1] != b[dataStart + i + 1] ||
+                a[dataStart + i + 2] != b[dataStart + i + 2])
+            {
+                diffs.Add(new SemanticDifference
+                {
+                    Type = DifferenceType.StitchType,
+                    Description = $"Stitch data differs at byte offset {dataStart + i}",
+                    ValueA = $"{a[dataStart + i]:X2} {a[dataStart + i + 1]:X2} {a[dataStart + i + 2]:X2}",
+                    ValueB = $"{b[dataStart + i]:X2} {b[dataStart + i + 1]:X2} {b[dataStart + i + 2]:X2}"
+                });
+            }
+        }
+
+        return diffs;
+    }
+
+    private int FindEndMarker(byte[] data, int start)
+    {
+        for (int i = start; i + 2 < data.Length; i += 3)
+        {
+            if (data[i] == 0xF3 && data[i + 1] == 0x00 && data[i + 2] == 0x00)
+                return i + 3;
+        }
+        return data.Length;
+    }
+
+    /// <summary>
+    /// Semantic diff between two AtlasProjects (for backward compatibility)
+    /// </summary>
+    public List<SemanticDifference> SemanticDiff(AtlasProject a, AtlasProject b)
+    {
         var engine = new StitchEngine();
         var planA = engine.Compile(a);
         var planB = engine.Compile(b);
+
+        var diffs = new List<SemanticDifference>();
 
         if (planA.TotalStitches != planB.TotalStitches)
         {
@@ -624,7 +698,6 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
             });
         }
 
-        // Compare bounds
         if (!planA.DesignBounds.Equals(planB.DesignBounds))
         {
             diffs.Add(new SemanticDifference
@@ -636,7 +709,6 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
             });
         }
 
-        // Compare color palette
         if (a.ThreadPalette.Count != b.ThreadPalette.Count)
         {
             diffs.Add(new SemanticDifference
@@ -710,13 +782,13 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
         // DST stores dimensions in 0.1mm units
         int width = BitConverter.ToInt16(header, 90);
         int height = BitConverter.ToInt16(header, 92);
-        
+
         project.CanvasWidth = width * 100; // Convert 0.1mm to microns
         project.CanvasHeight = height * 100;
 
         // Stitch count
         int stitchCount = BitConverter.ToInt32(header, 98);
-        
+
         // Color count
         int colorCount = header[102];
 
@@ -733,28 +805,28 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
     private byte[] BuildHeader(AtlasProject project, StitchPlan plan)
     {
         var header = new byte[512];
-        
+
         // Magic bytes
         header[0] = 0x20; // Space
         header[1] = 0x20; // Space
-        
+
         // Name (16 bytes at offset 2)
         var nameBytes = Encoding.ASCII.GetBytes(project.Name.PadRight(16).Substring(0, 16));
         nameBytes.CopyTo(header, 2);
-        
+
         // Dimensions at offset 90-97 (in 0.1mm)
         var bounds = project.GetDesignBounds();
         short width = (short)(bounds.Width / 100);
         short height = (short)(bounds.Height / 100);
         BitConverter.GetBytes(width).CopyTo(header, 90);
         BitConverter.GetBytes(height).CopyTo(header, 92);
-        
+
         // Stitch count at offset 98
         BitConverter.GetBytes((int)plan.TotalStitches).CopyTo(header, 98);
-        
+
         // Color count at offset 102
         header[102] = (byte)Math.Min(project.ThreadPalette.Count, 255);
-        
+
         return header;
     }
 
@@ -768,14 +840,14 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
     {
         var palette = new List<ThreadColor>();
         var hues = new[] { 0, 30, 60, 120, 180, 240, 270, 300 };
-        
+
         for (int i = 0; i < count; i++)
         {
             int hue = hues[i % hues.Length] + (i / hues.Length) * 15;
             var color = HsvToRgb(hue % 360, 0.8, 0.9);
             palette.Add(new ThreadColor(color.R, color.G, color.B, "DST", i.ToString("D3"), $"Color {i + 1}"));
         }
-        
+
         return palette;
     }
 
@@ -796,7 +868,7 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
             case 4: r = t; g = p; b = v; break;
             default: r = v; g = p; b = q; break;
         }
-        
+
         return ((byte)(r * 255), (byte)(g * 255), (byte)(b * 255));
     }
 
@@ -808,18 +880,18 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
     {
         // DST encoding:
         // b1: YYYY YYXX (Y high 6 bits, X high 2 bits)
-        // b2: XXXX XXYY (X mid 6 bits, Y mid 2 bits) 
+        // b2: XXXX XXYY (X mid 6 bits, Y mid 2 bits)
         // b3: YYXX XXFF (Y low 2 bits, X low 2 bits, Flags 4 bits)
-        
+
         int x = ((b1 & 0x03) << 10) | ((b2 & 0x3F) << 4) | ((b3 & 0xC0) >> 2);
         int y = ((b1 & 0xFC) << 4) | ((b2 & 0xC0) >> 2) | ((b3 & 0x30) >> 4);
-        
+
         // Sign extend 12-bit values
         if ((x & 0x800) != 0) x |= ~0xFFF;
         if ((y & 0x800) != 0) y |= ~0xFFF;
-        
+
         int flags = b3 & 0x0F;
-        
+
         return (x, -y, flags); // Y is inverted in DST
     }
 
@@ -831,15 +903,15 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
         // Clamp to 12-bit signed range
         dx = Math.Clamp(dx, -2048, 2047);
         dy = Math.Clamp(dy, -2048, 2047);
-        
+
         // DST uses inverted Y
         int x = dx & 0xFFF;
         int y = (-dy) & 0xFFF;
-        
+
         byte b1 = (byte)(((y >> 4) & 0xFC) | ((x >> 10) & 0x03));
         byte b2 = (byte)(((x >> 4) & 0x3F) | ((y >> 2) & 0xC0));
         byte b3 = (byte)(((y & 0x03) << 4) | ((x & 0x03) << 2) | (flags & 0x0F));
-        
+
         return (b1, b2, b3);
     }
 

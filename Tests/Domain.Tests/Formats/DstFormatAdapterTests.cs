@@ -3,6 +3,7 @@ namespace AtlasEmbroidery.Domain.Tests.Formats;
 using AtlasEmbroidery.Domain.Formats.Dst;
 using AtlasEmbroidery.Domain.Models;
 using AtlasEmbroidery.Domain.Formats;
+using AtlasEmbroidery.Domain.Stitching;
 using FluentAssertions;
 using Xunit;
 
