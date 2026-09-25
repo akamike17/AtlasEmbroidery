@@ -14,7 +14,7 @@ using System.Text;
 internal static class DstSpec
 {
     public const int HeaderSize = 512;
-    public const int MaxDeltaPerRecord = 127; // DST units (12.7mm) - Tajima spec
+    public const int MaxDeltaPerRecord = 121; // DST units (12.1mm) - balanced ternary max: 1+3+9+27+81=121
     public const int MicronsPerDstUnit = 100; // 1 DST unit = 0.1mm = 100 microns
     
     // Control byte values (bits 7-6 of byte 3) - raw values before shifting
