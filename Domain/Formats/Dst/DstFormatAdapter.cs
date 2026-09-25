@@ -11,7 +11,7 @@ using System.Text;
 /// <summary>
 /// Tajima DST format constants and specifications
 /// </summary>
-internal static class DstSpec
+public static class DstSpec
 {
     public const int HeaderSize = 512;
     public const int MaxDeltaPerRecord = 121; // DST units (12.1mm) - balanced ternary max: 1+3+9+27+81=121
@@ -40,7 +40,7 @@ internal static class DstSpec
 /// <summary>
 /// DST movement encoder using balanced ternary representation
 /// </summary>
-internal static class DstMovementEncoder
+public static class DstMovementEncoder
 {
     /// <summary>
     /// Encodes a delta in DST units (max ±121) into 3 bytes
@@ -54,14 +54,14 @@ internal static class DstMovementEncoder
         var xEncoded = EncodeAxis(deltaX);
         var yEncoded = EncodeAxis(deltaY);
         
-        // Pack into 3 bytes:
-        // Byte 1: Y[5:0] | X[7:6]
-        // Byte 2: X[5:0] | Y[7:6] 
-        // Byte 3: control[7:6] | Y[9:8] | X[9:8]
+        // Pack into 3 bytes per Tajima DST spec:
+        // Byte 1 (b1): Y[5:0] in bits 5:0 | X[7:6] in bits 7:6
+        // Byte 2 (b2): X[5:0] in bits 5:0 | Y[7:6] in bits 7:6
+        // Byte 3 (b3): control[7:6] | Y[9:8] in bits 3:2 | X[9:8] in bits 1:0
         
-        byte b1 = (byte)((yEncoded & 0x3F) | ((xEncoded >> 6) & 0x03));
-        byte b2 = (byte)((xEncoded & 0x3F) | ((yEncoded >> 6) & 0xC0));
-        byte b3 = (byte)((controlByte & 0xC0) | ((yEncoded >> 8) & 0x03) << 2 | ((xEncoded >> 8) & 0x03));
+        byte b1 = (byte)((yEncoded & 0x3F) | (((xEncoded >> 6) & 0x03) << 6));
+        byte b2 = (byte)((xEncoded & 0x3F) | (((yEncoded >> 6) & 0x03) << 6));
+        byte b3 = (byte)((controlByte & 0xC0) | (((yEncoded >> 8) & 0x03) << 2) | ((xEncoded >> 8) & 0x03));
         
         return (b1, b2, b3);
     }
@@ -71,75 +71,106 @@ internal static class DstMovementEncoder
     /// </summary>
     public static (int deltaX, int deltaY, byte control) DecodeMovement(byte b1, byte b2, byte b3)
     {
-        int xEncoded = (b1 & 0x03) << 6 | (b2 & 0x3F);
-        int yEncoded = ((b2 & 0xC0) >> 2) | (b1 & 0x3F);
+        // Byte layout per Tajima DST spec:
+        // b1[5:0] = Y[5:0], b1[7:6] = X[7:6]
+        // b2[5:0] = X[5:0], b2[7:6] = Y[7:6]
+        // b3[1:0] = X[9:8], b3[3:2] = Y[9:8], b3[7:6] = control
         
-        // Extend with bits from byte 3 (bits 1-0 for x, bits 3-2 for y)
-        xEncoded |= ((b3 >> 2) & 0x03) << 8;
-        yEncoded |= ((b3 >> 4) & 0x03) << 8;
-        
+        int xEncoded = (b2 & 0x3F) | (b1 & 0xC0) | ((b3 & 0x03) << 8);
+        int yEncoded = (b1 & 0x3F) | (b2 & 0xC0) | (((b3 >> 2) & 0x03) << 8);
+
         int deltaX = DecodeAxis(xEncoded);
         int deltaY = DecodeAxis(yEncoded);
         byte control = (byte)((b3 >> 6) & 0x03); // Control is in bits 7-6
-        
+
         return (deltaX, deltaY, control);
     }
     
     private static int EncodeAxis(int delta)
     {
         // Balanced ternary encoding for DST
-        // Magnitudes: 1, 3, 9, 27, 81
-        // Each magnitude can be -1, 0, +1
-        // Result fits in 10 bits (0-1023 for positive, 1024-2047 for negative via sign bit)
-        // Encoding: lowest magnitude in lowest bits (bits 0-1 for mag=1, bits 2-3 for mag=3, etc.)
+        // Magnitudes: 1, 3, 9, 27, 81 (3^0, 3^1, 3^2, 3^3, 3^4)
+        // Each trit can be -1, 0, +1
+        // Encoded in 10 bits: 2 bits per trit (00=0, 01=+1, 10=-1, 11=invalid)
+        // Sign is inherent in the trits (no separate sign bit)
         
-        bool negative = delta < 0;
-        int absDelta = Math.Abs(delta);
+        if (delta < -DstSpec.MaxDeltaPerRecord || delta > DstSpec.MaxDeltaPerRecord)
+            throw new ArgumentOutOfRangeException(nameof(delta), $"Delta {delta} exceeds max ±{DstSpec.MaxDeltaPerRecord}");
         
-        if (absDelta > DstSpec.MaxDeltaPerRecord)
-            throw new ArgumentOutOfRangeException(nameof(delta), $"Delta {delta} exceeds max {DstSpec.MaxDeltaPerRecord}");
-        
+        int n = delta;
         int encoded = 0;
-        int remaining = absDelta;
         
         for (int i = 0; i < DstSpec.MoveMagnitudes.Length; i++)
         {
-            int mag = DstSpec.MoveMagnitudes[i];
-            int digit = remaining / mag;
-            if (digit > 1) digit = 1;
-            remaining -= digit * mag;
+            int mag = DstSpec.MoveMagnitudes[i]; // 1, 3, 9, 27, 81
+            int r = n % 3;
+            n = n / 3;
             
-            encoded |= (digit << (i * 2));
+            // Convert to balanced ternary: if remainder is 2, make it -1 and carry 1
+            // For negative numbers in C#, % can return negative, so handle both cases
+            int trit;
+            if (r == 2)
+            {
+                trit = -1;
+                n += 1;
+            }
+            else if (r == -2)
+            {
+                trit = 1;
+                n -= 1;
+            }
+            else
+            {
+                trit = r; // -1, 0, or 1
+            }
+            
+            // Encode trit in 2 bits: 00=0, 01=+1, 10=-1
+            int tritBits;
+            if (trit == 1) tritBits = 0b01;
+            else if (trit == -1) tritBits = 0b10;
+            else tritBits = 0b00;
+            
+            encoded |= (tritBits << (i * 2));
         }
         
-        if (negative)
-            encoded |= 0x400; // Sign bit at position 10
+        // n should be 0 now for exact representation
+        if (n != 0)
+            throw new InvalidOperationException($"Failed to encode delta {delta} in balanced ternary: remainder {n}");
         
         return encoded;
     }
     
     private static int DecodeAxis(int encoded)
     {
-        bool negative = (encoded & 0x400) != 0;
-        int value = encoded & 0x3FF;
+        // Decode balanced ternary from 10 bits (2 bits per trit)
+        // 00 = 0, 01 = +1, 10 = -1, 11 = invalid
         
         int result = 0;
         for (int i = 0; i < DstSpec.MoveMagnitudes.Length; i++)
         {
-            int digit = (value >> (i * 2)) & 0x03;
-            if (digit > 1) 
-                throw new InvalidDataException($"Invalid balanced ternary digit {digit} at magnitude {DstSpec.MoveMagnitudes[i]} (must be 0 or 1)");
-            result += digit * DstSpec.MoveMagnitudes[i];
+            int tritBits = (encoded >> (i * 2)) & 0x03;
+            int trit;
+            
+            switch (tritBits)
+            {
+                case 0b00: trit = 0; break;
+                case 0b01: trit = 1; break;
+                case 0b10: trit = -1; break;
+                default:
+                    throw new InvalidDataException($"Invalid balanced ternary trit {tritBits} at magnitude {DstSpec.MoveMagnitudes[i]} (must be 00, 01, or 10)");
+            }
+            
+            result += trit * DstSpec.MoveMagnitudes[i];
         }
         
-        return negative ? -result : result;
+        return result;
     }
 }
 
 /// <summary>
 /// DST Header parser and builder
 /// </summary>
-internal sealed class DstHeader
+public sealed class DstHeader
 {
     public string Label { get; set; } = "";
     public int StitchCount { get; set; }
@@ -251,7 +282,7 @@ internal sealed class DstHeader
 /// <summary>
 /// Represents a parsed DST stitch record
 /// </summary>
-internal sealed class DstStitchRecord
+public sealed class DstStitchRecord
 {
     public int DeltaX { get; set; } // DST units
     public int DeltaY { get; set; } // DST units
@@ -261,7 +292,7 @@ internal sealed class DstStitchRecord
 }
 
 [Flags]
-internal enum DstControl : byte
+public enum DstControl : byte
 {
     None = 0,
     Normal = 0,      // Bits 7-6 = 00
