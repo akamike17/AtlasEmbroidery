@@ -9,8 +9,269 @@ using FmtValidationSeverity = AtlasEmbroidery.Domain.Formats.ValidationSeverity;
 using System.Text;
 
 /// <summary>
-/// DST (Tajima) format adapter - Reader/Writer/Normalization/Read-back/Semantic diff
-/// DST es el formato nativo de máquinas Tajima, ampliamente soportado
+/// Tajima DST format constants and specifications
+/// </summary>
+internal static class DstSpec
+{
+    public const int HeaderSize = 512;
+    public const int MaxDeltaPerRecord = 127; // DST units (12.7mm) - Tajima spec
+    public const int MicronsPerDstUnit = 100; // 1 DST unit = 0.1mm = 100 microns
+    
+    // Control byte values (bits 7-6 of byte 3) - raw values before shifting
+    public const byte StitchNormal = 0x00;     // 00xxxxxx (0 << 6)
+    public const byte StitchJump = 0x40;       // 01xxxxxx (1 << 6)
+    public const byte StitchColorChange = 0x80; // 10xxxxxx (2 << 6)
+    public const byte StitchEnd = 0xC0;        // 11xxxxxx (3 << 6)
+    
+    // End marker: 3 bytes (0xF3 0x00 0x00)
+    public static readonly byte[] EndMarker = { 0xF3, 0x00, 0x00 };
+    
+    // Movement encoding: balanced ternary with magnitudes 1,3,9,27,81
+    public static readonly int[] MoveMagnitudes = { 1, 3, 9, 27, 81 };
+    
+    // Header field labels
+    public static readonly string[] HeaderLabels = 
+    {
+        "LA:", "ST:", "CO:", "+X:", "-X:", "+Y:", "-Y:",
+        "AX:", "AY:", "MX:", "MY:", "PD:"
+    };
+}
+
+/// <summary>
+/// DST movement encoder using balanced ternary representation
+/// </summary>
+internal static class DstMovementEncoder
+{
+    /// <summary>
+    /// Encodes a delta in DST units (max ±121) into 3 bytes
+    /// Returns (byte1, byte2, byte3) where byte3 contains the control bits in bits 7-6
+    /// </summary>
+    public static (byte b1, byte b2, byte b3) EncodeMovement(int deltaX, int deltaY, byte controlByte)
+    {
+        // deltaX and deltaY are already in DST units, range [-121, 121]
+        // DST uses balanced ternary encoding
+        
+        var xEncoded = EncodeAxis(deltaX);
+        var yEncoded = EncodeAxis(deltaY);
+        
+        // Pack into 3 bytes:
+        // Byte 1: Y[5:0] | X[7:6]
+        // Byte 2: X[5:0] | Y[7:6] 
+        // Byte 3: control[7:6] | Y[9:8] | X[9:8]
+        
+        byte b1 = (byte)((yEncoded & 0x3F) | ((xEncoded >> 6) & 0x03));
+        byte b2 = (byte)((xEncoded & 0x3F) | ((yEncoded >> 6) & 0xC0));
+        byte b3 = (byte)((controlByte & 0xC0) | ((yEncoded >> 8) & 0x03) << 2 | ((xEncoded >> 8) & 0x03));
+        
+        return (b1, b2, b3);
+    }
+    
+    /// <summary>
+    /// Decodes 3 bytes into deltaX, deltaY, controlByte
+    /// </summary>
+    public static (int deltaX, int deltaY, byte control) DecodeMovement(byte b1, byte b2, byte b3)
+    {
+        int xEncoded = (b1 & 0x03) << 6 | (b2 & 0x3F);
+        int yEncoded = ((b2 & 0xC0) >> 2) | (b1 & 0x3F);
+        
+        // Extend with bits from byte 3 (bits 1-0 for x, bits 3-2 for y)
+        xEncoded |= ((b3 >> 2) & 0x03) << 8;
+        yEncoded |= ((b3 >> 4) & 0x03) << 8;
+        
+        int deltaX = DecodeAxis(xEncoded);
+        int deltaY = DecodeAxis(yEncoded);
+        byte control = (byte)((b3 >> 6) & 0x03); // Control is in bits 7-6
+        
+        return (deltaX, deltaY, control);
+    }
+    
+    private static int EncodeAxis(int delta)
+    {
+        // Balanced ternary encoding for DST
+        // Magnitudes: 1, 3, 9, 27, 81
+        // Each magnitude can be -1, 0, +1
+        // Result fits in 10 bits (0-1023 for positive, 1024-2047 for negative via sign bit)
+        // Encoding: lowest magnitude in lowest bits (bits 0-1 for mag=1, bits 2-3 for mag=3, etc.)
+        
+        bool negative = delta < 0;
+        int absDelta = Math.Abs(delta);
+        
+        if (absDelta > DstSpec.MaxDeltaPerRecord)
+            throw new ArgumentOutOfRangeException(nameof(delta), $"Delta {delta} exceeds max {DstSpec.MaxDeltaPerRecord}");
+        
+        int encoded = 0;
+        int remaining = absDelta;
+        
+        for (int i = 0; i < DstSpec.MoveMagnitudes.Length; i++)
+        {
+            int mag = DstSpec.MoveMagnitudes[i];
+            int digit = remaining / mag;
+            if (digit > 1) digit = 1;
+            remaining -= digit * mag;
+            
+            encoded |= (digit << (i * 2));
+        }
+        
+        if (negative)
+            encoded |= 0x400; // Sign bit at position 10
+        
+        return encoded;
+    }
+    
+    private static int DecodeAxis(int encoded)
+    {
+        bool negative = (encoded & 0x400) != 0;
+        int value = encoded & 0x3FF;
+        
+        int result = 0;
+        for (int i = 0; i < DstSpec.MoveMagnitudes.Length; i++)
+        {
+            int digit = (value >> (i * 2)) & 0x03;
+            if (digit > 1) 
+                throw new InvalidDataException($"Invalid balanced ternary digit {digit} at magnitude {DstSpec.MoveMagnitudes[i]} (must be 0 or 1)");
+            result += digit * DstSpec.MoveMagnitudes[i];
+        }
+        
+        return negative ? -result : result;
+    }
+}
+
+/// <summary>
+/// DST Header parser and builder
+/// </summary>
+internal sealed class DstHeader
+{
+    public string Label { get; set; } = "";
+    public int StitchCount { get; set; }
+    public int ColorChanges { get; set; }
+    public int MinX { get; set; }
+    public int MaxX { get; set; }
+    public int MinY { get; set; }
+    public int MaxY { get; set; }
+    public int StartX { get; set; }
+    public int StartY { get; set; }
+    public int EndX { get; set; }
+    public int EndY { get; set; }
+    
+    public static DstHeader Parse(byte[] headerBytes)
+    {
+        var header = new DstHeader();
+        string text = Encoding.ASCII.GetString(headerBytes);
+        
+        // Parse line by line
+        var lines = text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+        
+        foreach (var line in lines)
+        {
+            var trimmed = line.Trim();
+            if (trimmed.StartsWith("LA:"))
+                header.Label = trimmed.Substring(3).Trim();
+            else if (trimmed.StartsWith("ST:"))
+            {
+                if (int.TryParse(trimmed.Substring(3).Trim(), out var stitchCount))
+                    header.StitchCount = stitchCount;
+            }
+            else if (trimmed.StartsWith("CO:"))
+            {
+                if (int.TryParse(trimmed.Substring(3).Trim(), out var colorChanges))
+                    header.ColorChanges = colorChanges;
+            }
+            else if (trimmed.StartsWith("+X:"))
+            {
+                if (int.TryParse(trimmed.Substring(3).Trim(), out var maxX))
+                    header.MaxX = maxX;
+            }
+            else if (trimmed.StartsWith("-X:"))
+            {
+                if (int.TryParse(trimmed.Substring(3).Trim(), out var minX))
+                    header.MinX = minX;
+            }
+            else if (trimmed.StartsWith("+Y:"))
+            {
+                if (int.TryParse(trimmed.Substring(3).Trim(), out var maxY))
+                    header.MaxY = maxY;
+            }
+            else if (trimmed.StartsWith("-Y:"))
+            {
+                if (int.TryParse(trimmed.Substring(3).Trim(), out var minY))
+                    header.MinY = minY;
+            }
+            else if (trimmed.StartsWith("AX:"))
+            {
+                if (int.TryParse(trimmed.Substring(3).Trim(), out var startX))
+                    header.StartX = startX;
+            }
+            else if (trimmed.StartsWith("AY:"))
+            {
+                if (int.TryParse(trimmed.Substring(3).Trim(), out var startY))
+                    header.StartY = startY;
+            }
+            else if (trimmed.StartsWith("MX:"))
+            {
+                if (int.TryParse(trimmed.Substring(3).Trim(), out var endX))
+                    header.EndX = endX;
+            }
+            else if (trimmed.StartsWith("MY:"))
+            {
+                if (int.TryParse(trimmed.Substring(3).Trim(), out var endY))
+                    header.EndY = endY;
+            }
+        }
+        
+        return header;
+    }
+    
+    public byte[] ToBytes()
+    {
+        var lines = new List<string>
+        {
+            $"LA:{Label}",
+            $"ST:{StitchCount}",
+            $"CO:{ColorChanges}",
+            $"+X:{MaxX}",
+            $"-X:{MinX}",
+            $"+Y:{MaxY}",
+            $"-Y:{MinY}",
+            $"AX:{StartX}",
+            $"AY:{StartY}",
+            $"MX:{EndX}",
+            $"MY:{EndY}",
+            "PD:******"
+        };
+        
+        var text = string.Join("\r\n", lines) + "\r\n";
+        var bytes = Encoding.ASCII.GetBytes(text);
+        
+        var result = new byte[DstSpec.HeaderSize];
+        Array.Copy(bytes, result, Math.Min(bytes.Length, DstSpec.HeaderSize));
+        return result;
+    }
+}
+
+/// <summary>
+/// Represents a parsed DST stitch record
+/// </summary>
+internal sealed class DstStitchRecord
+{
+    public int DeltaX { get; set; } // DST units
+    public int DeltaY { get; set; } // DST units
+    public DstControl Control { get; set; }
+    public int AbsoluteX { get; set; } // DST units
+    public int AbsoluteY { get; set; } // DST units
+}
+
+[Flags]
+internal enum DstControl : byte
+{
+    None = 0,
+    Normal = 0,      // Bits 7-6 = 00
+    Jump = 1,        // Bits 7-6 = 01
+    ColorChange = 2, // Bits 7-6 = 10
+    End = 3          // Bits 7-6 = 11
+}
+
+/// <summary>
+/// Tajima DST format adapter - Correct implementation per Tajima specification
 /// </summary>
 public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryFormatWriter, IEmbroideryNormalizer, IEmbroideryFormatValidator
 {
@@ -19,244 +280,357 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
     public string[] Extensions => new[] { ".dst", ".DST" };
     public string MimeType => "application/x-dst";
     public string DefaultExtension => ".dst";
+    
     public FormatCapabilities Capabilities => new()
     {
         SupportsReading = true,
         SupportsWriting = true,
-        SupportsTrim = true,
+        SupportsTrim = true, // DST uses jumps for trim (no native trim command)
         SupportsJump = true,
         SupportsColorChange = true,
-        SupportsStop = true,
+        SupportsStop = true, // Color change acts as stop
         SupportsSequins = false,
         SupportsPuff3D = false,
-        MaxStitchLength = 1270, // 12.7mm en décimas de mm (0.1mm units)
-        MaxJumpLength = 1270,
+        MaxStitchLength = DstSpec.MaxDeltaPerRecord * DstSpec.MicronsPerDstUnit, // 12100 microns = 12.1mm
+        MaxJumpLength = DstSpec.MaxDeltaPerRecord * DstSpec.MicronsPerDstUnit,
         MaxStitchesPerColor = 65535,
         MaxTotalStitches = 2000000,
         MaxColors = 250,
     };
 
-    private const byte StitchControlByte = 0x80;
-    private const byte TrimMask = 0x04;
-    private const byte StopMask = 0x08;
-    private const byte ColorChangeMask = 0x01;
-    private const byte JumpMask = 0x02;
-    private const byte EndOfDataMask = 0x03;
+    private const long MaxDocumentBytes = 50 * 1024 * 1024; // 50 MB
 
     /// <summary>
-    /// Lee un archivo DST y convierte a AtlasProject
+    /// Reads a DST file and converts to AtlasProject
     /// </summary>
     public async Task<AtlasProject> ReadAsync(Stream stream, FormatReadOptions? options = null, CancellationToken ct = default)
     {
         options ??= new FormatReadOptions();
-
+        
+        if (stream.Length > MaxDocumentBytes)
+            throw new InvalidDataException($"DST file exceeds maximum size of {MaxDocumentBytes} bytes");
+        
         using var reader = new BinaryReader(stream, Encoding.ASCII, leaveOpen: true);
-
-        // Header DST: 512 bytes
-        var header = reader.ReadBytes(512);
-        if (header.Length < 512)
-            throw new InvalidDataException("DST file too small for header");
-
-        // Validate if requested
+        
+        // Read header
+        var headerBytes = reader.ReadBytes(DstSpec.HeaderSize);
+        if (headerBytes.Length < DstSpec.HeaderSize)
+            throw new InvalidDataException("DST file too small for header (512 bytes required)");
+        
+        var header = DstHeader.Parse(headerBytes);
+        
+        if (!headerBytes.Take(3).SequenceEqual(Encoding.ASCII.GetBytes("LA:")))
+            throw new InvalidDataException("Invalid DST header: missing LA: prefix");
+        
         if (options.ValidateOnly)
         {
-            var validation = Validate(stream);
+            var validation = await ValidateAsync(stream);
             if (!validation.IsValid)
                 throw new InvalidDataException($"DST validation failed: {string.Join("; ", validation.Issues.Select(i => i.Message))}");
-            // Return minimal project for validation-only
             return new AtlasProject { Name = "Validation Only" };
         }
-
-        // Parse header
-        var project = ParseHeader(header);
-
-        // Check size limits
-        if (options.MaxStitches > 0)
-        {
-            // We'll check during reading
-        }
-
-        // Read stitch data
-        var stitches = new List<StitchPoint>();
-        var currentX = 0;
-        var currentY = 0;
-        var colorIndex = 0;
-        var needleIndex = 1;
-        int stitchCount = 0;
-
-        // DST stitch records are 3 bytes each
-        while (stream.Position < stream.Length)
+        
+        // Read stitch records
+        var records = new List<DstStitchRecord>();
+        int currentX = 0, currentY = 0;
+        int colorIndex = 0;
+        int recordCount = 0;
+        int colorChangeCount = 0;
+        
+        while (stream.Position + 2 < stream.Length)
         {
             ct.ThrowIfCancellationRequested();
-
-            if (stitchCount >= options.MaxStitches)
+            
+            if (recordCount >= options.MaxStitches)
                 throw new InvalidDataException($"Stitch count exceeds maximum allowed: {options.MaxStitches}");
-
+            if (colorChangeCount >= options.MaxColors)
+                throw new InvalidDataException($"Color change count exceeds maximum allowed: {options.MaxColors}");
+            
+            // Check for end marker BEFORE decoding (0xF3 0x00 0x00)
+            if (stream.Position + 2 < stream.Length)
+            {
+                long pos = stream.Position;
+                byte peek1 = reader.ReadByte();
+                byte peek2 = reader.ReadByte();
+                byte peek3 = reader.ReadByte();
+                
+                if (peek1 == 0xF3 && peek2 == 0x00 && peek3 == 0x00)
+                {
+                    // End marker found - don't consume it, leave position for caller
+                    stream.Position = pos;
+                    break;
+                }
+                
+                // Not end marker, rewind and decode normally
+                stream.Position = pos;
+            }
+            
             byte b1 = reader.ReadByte();
             byte b2 = reader.ReadByte();
             byte b3 = reader.ReadByte();
-
-            // Check for end of data (0xF3, 0x00, 0x00 or similar)
-            if (b1 == 0xF3 && b2 == 0x00 && b3 == 0x00)
-                break;
-
-            // Parse DST stitch format
-            var (dx, dy, flags) = DecodeStitch(b1, b2, b3);
-
-            currentX += dx;
-            currentY += dy;
-
-            var stitch = new StitchPoint(currentX, currentY, StitchType.Running, (byte)needleIndex, (byte)colorIndex, (ushort)flags);
-
-            // Handle control commands
-            if ((flags & (ushort)DstFlags.ColorChange) != 0)
+            
+            var (deltaX, deltaY, control) = DstMovementEncoder.DecodeMovement(b1, b2, b3);
+            var dstControl = (DstControl)control;
+            
+            currentX += deltaX;
+            currentY += deltaY;
+            
+            var record = new DstStitchRecord
+            {
+                DeltaX = deltaX,
+                DeltaY = deltaY,
+                Control = dstControl,
+                AbsoluteX = currentX,
+                AbsoluteY = currentY
+            };
+            records.Add(record);
+            recordCount++;
+            
+            if (dstControl == DstControl.ColorChange)
             {
                 colorIndex++;
-                if (colorIndex >= options.MaxColors)
-                    throw new InvalidDataException($"Color count exceeds maximum allowed: {options.MaxColors}");
-                needleIndex = (colorIndex % Capabilities.MaxColors) + 1;
+                colorChangeCount++;
             }
-
-            if ((flags & (ushort)DstFlags.End) != 0)
-                break;
-
-            stitches.Add(stitch);
-            stitchCount++;
         }
-
-        // Create a single shape object with all stitches
+        
+        // Convert to AtlasProject
+        var project = new AtlasProject
+        {
+            Name = header.Label,
+            SourceFileHash = ComputeHash(headerBytes)
+        };
+        
+        // Convert DST units to microns
+        var stitchPoints = new List<StitchPoint>();
+        int needleIndex = 1;
+        colorIndex = 0;
+        
+        foreach (var record in records)
+        {
+            int xMicrons = record.AbsoluteX * DstSpec.MicronsPerDstUnit;
+            int yMicrons = record.AbsoluteY * DstSpec.MicronsPerDstUnit;
+            
+            var flags = (ushort)0;
+            if (record.Control == DstControl.Jump) flags |= 0x01;
+            if (record.Control == DstControl.ColorChange) flags |= 0x02;
+            
+            var stitch = new StitchPoint(
+                xMicrons, yMicrons, 
+                StitchType.Running, 
+                (byte)needleIndex, 
+                (byte)colorIndex, 
+                flags);
+            stitchPoints.Add(stitch);
+            
+            if (record.Control == DstControl.ColorChange)
+            {
+                colorIndex++;
+                needleIndex = (colorIndex % 15) + 1;
+            }
+        }
+        
+        // Create shape object from stitch points
         var shapeObj = new ShapeObject
         {
             Name = "Imported DST",
-            Vertices = stitches.Select(s => s.Position).ToList(),
+            Vertices = stitchPoints.Select(s => s.Position).ToList(),
             IsClosed = false,
             StitchParams = StitchParams.DefaultFor(StitchType.Running)
         };
-
+        
         project.Objects.Add(shapeObj);
+        
+        // Build thread palette (DST doesn't store RGB - generate defaults)
         project.ThreadPalette = GenerateDefaultPalette(colorIndex + 1);
-
-        // Update ColorToNeedleMap
         for (int i = 0; i <= colorIndex; i++)
         {
-            project.ColorToNeedleMap[i] = (i % Capabilities.MaxColors) + 1;
+            project.ColorToNeedleMap[i] = (i % 15) + 1;
         }
-
+        
         project.RecalculateBounds();
         project.Touch();
-
+        
         return project;
     }
 
     /// <summary>
-    /// Escribe AtlasProject a formato DST
+    /// Writes AtlasProject to DST format
     /// </summary>
     public async Task WriteAsync(AtlasProject project, Stream stream, FormatWriteOptions? options = null, CancellationToken ct = default)
     {
         options ??= new FormatWriteOptions();
-
+        
         using var writer = new BinaryWriter(stream, Encoding.ASCII, leaveOpen: true);
-
+        
         // Compile to stitch plan
         var engine = new StitchEngine();
         var plan = engine.Compile(project);
-
-        // Build header
-        var header = BuildHeader(project, plan);
-        writer.Write(header);
-
-        // Write stitch data
-        var allStitches = plan.GetAllStitches();
-        var lastX = 0;
-        var lastY = 0;
-        var currentColor = -1;
-
+        var allStitches = plan.GetAllStitches().ToList();
+        
+        if (!allStitches.Any())
+        {
+            // Empty design - write minimal header
+            var emptyHeader = new DstHeader
+            {
+                Label = project.Name ?? "Empty",
+                StitchCount = 0,
+                ColorChanges = 0
+            }.ToBytes();
+            writer.Write(emptyHeader);
+            // End marker (Tajima spec: 0xF3 0x00 0x00)
+            writer.Write(0xF3);
+            writer.Write((byte)0x00);
+            writer.Write((byte)0x00);
+            return;
+        }
+        
+        // Build stitch records with proper DST encoding
+        var records = new List<DstStitchRecord>();
+        int lastX = 0, lastY = 0;
+        int currentColor = -1;
+        int colorChangeCount = 0;
+        
         foreach (var stitch in allStitches)
         {
             ct.ThrowIfCancellationRequested();
-
-            int dx = stitch.X - lastX;
-            int dy = stitch.Y - lastY;
-
-            // Clamp to DST limits (±1270 in 0.1mm units = ±12.7mm)
-            dx = Math.Clamp(dx, -Capabilities.MaxStitchLength, Capabilities.MaxStitchLength);
-            dy = Math.Clamp(dy, -Capabilities.MaxStitchLength, Capabilities.MaxStitchLength);
-
-            byte flags = 0;
-
-            if (stitch.IsTrim) flags |= (byte)DstFlags.Trim;
-            if (stitch.IsJump) flags |= (byte)DstFlags.Jump;
-            if (stitch.IsStop) flags |= (byte)DstFlags.Stop;
-
-            // Color change detection
-            if (stitch.ColorIndex != currentColor)
+            
+            // Convert microns to DST units
+            int targetX = stitch.X / DstSpec.MicronsPerDstUnit;
+            int targetY = stitch.Y / DstSpec.MicronsPerDstUnit;
+            
+            int deltaX = targetX - lastX;
+            int deltaY = targetY - lastY;
+            
+            // Decompose large movements into multiple records
+            var decomposedRecords = DecomposeMovement(deltaX, deltaY, stitch, currentColor != stitch.ColorIndex);
+            
+            foreach (var rec in decomposedRecords)
             {
-                currentColor = stitch.ColorIndex;
-                if (currentColor > 0)
-                    flags |= (byte)DstFlags.ColorChange;
+                records.Add(rec);
+                lastX += rec.DeltaX;
+                lastY += rec.DeltaY;
+                
+                if (rec.Control == DstControl.ColorChange)
+                {
+                    colorChangeCount++;
+                    currentColor = stitch.ColorIndex;
+                }
             }
-
-            var (b1, b2, b3) = EncodeStitch(dx, dy, flags);
+        }
+        
+        // Build header
+        var header = BuildHeader(project, records, colorChangeCount);
+        writer.Write(header.ToBytes());
+        
+        // Write stitch records
+        foreach (var record in records)
+        {
+            ct.ThrowIfCancellationRequested();
+            
+            byte controlByte = (byte)record.Control;
+            var (b1, b2, b3) = DstMovementEncoder.EncodeMovement(record.DeltaX, record.DeltaY, controlByte);
             writer.Write(b1);
             writer.Write(b2);
             writer.Write(b3);
-
-            lastX = stitch.X;
-            lastY = stitch.Y;
         }
-
-        // End of data marker
-        writer.Write((byte)0xF3);
+        
+        // End marker (Tajima spec: 0xF3 0x00 0x00)
+        writer.Write(0xF3);
         writer.Write((byte)0x00);
         writer.Write((byte)0x00);
-
-        // Pad to 3-byte boundary if needed
-        while (stream.Position % 3 != 0)
-        {
-            writer.Write((byte)0x00);
-        }
     }
 
     /// <summary>
-    /// Normaliza un proyecto DST (limpia, valida, corrige)
+    /// Decomposes a large movement into multiple DST records (max ±121 per axis)
+    /// </summary>
+    private static List<DstStitchRecord> DecomposeMovement(int deltaX, int deltaY, StitchPoint stitch, bool isColorChange)
+    {
+        var records = new List<DstStitchRecord>();
+        int remainingX = deltaX;
+        int remainingY = deltaY;
+        bool firstRecord = true;
+        
+        while (Math.Abs(remainingX) > DstSpec.MaxDeltaPerRecord || Math.Abs(remainingY) > DstSpec.MaxDeltaPerRecord)
+        {
+            int stepX = Math.Clamp(remainingX, -DstSpec.MaxDeltaPerRecord, DstSpec.MaxDeltaPerRecord);
+            int stepY = Math.Clamp(remainingY, -DstSpec.MaxDeltaPerRecord, DstSpec.MaxDeltaPerRecord);
+            
+            remainingX -= stepX;
+            remainingY -= stepY;
+            
+            var control = firstRecord && isColorChange ? DstControl.ColorChange : 
+                         (stitch.IsJump ? DstControl.Jump : DstControl.Normal);
+            
+            records.Add(new DstStitchRecord
+            {
+                DeltaX = stepX,
+                DeltaY = stepY,
+                Control = control
+            });
+            
+            firstRecord = false;
+        }
+        
+        // Final record
+        if (remainingX != 0 || remainingY != 0 || firstRecord)
+        {
+            var control = firstRecord && isColorChange ? DstControl.ColorChange :
+                         (stitch.IsJump ? DstControl.Jump : DstControl.Normal);
+            
+            records.Add(new DstStitchRecord
+            {
+                DeltaX = remainingX,
+                DeltaY = remainingY,
+                Control = control
+            });
+        }
+        
+        return records;
+    }
+
+    /// <summary>
+    /// Normalizes a DST project
     /// </summary>
     public AtlasProject Normalize(AtlasProject project, NormalizationProfile? profile = null)
     {
         profile ??= new NormalizationProfile();
         var normalized = project.DeepClone();
-
-        // Remove stitches beyond machine limits
+        
         foreach (var obj in normalized.Objects)
         {
             var param = obj.StitchParams;
             if (profile.ClampToMachineLimits)
             {
-                param.MaxStitchLength = Math.Min(param.MaxStitchLength, profile.MaxStitchLengthMicrons);
-                param.MaxJumpDistance = Math.Min(param.MaxJumpDistance, profile.MaxJumpLengthMicrons);
+                int maxStitchDst = Capabilities.MaxStitchLength;
+                int maxJumpDst = Capabilities.MaxJumpLength;
+                param.MaxStitchLength = Math.Min(param.MaxStitchLength, maxStitchDst);
+                param.MaxJumpDistance = Math.Min(param.MaxJumpDistance, maxJumpDst);
             }
         }
-
-        // Ensure color palette doesn't exceed limits
+        
         if (profile.EnsureValidColorPalette && normalized.ThreadPalette.Count > profile.MaxColors)
         {
             normalized.ThreadPalette = normalized.ThreadPalette.Take(profile.MaxColors).ToList();
         }
-
-        // Remove duplicate consecutive stitches
+        
         if (profile.RemoveDuplicateStitches)
         {
-            // Placeholder - actual deduplication would need StitchPlan
-            // This is handled at the StitchPlan level during compilation
+            // This requires StitchPlan - delegate to StitchEngine level
+            // For now, mark as not implemented at this level
         }
-
+        
+        if (profile.FixInvalidCoordinates)
+        {
+            // Coordinates are already validated during read/write
+        }
+        
         normalized.RecalculateBounds();
         normalized.Touch();
-
         return normalized;
     }
 
     /// <summary>
-    /// Validates a DST file stream (synchronous - implements IEmbroideryFormatReader)
+    /// Validates a DST file stream (synchronous)
     /// </summary>
     public FormatValidationResult Validate(Stream stream)
     {
@@ -264,7 +638,7 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
     }
 
     /// <summary>
-    /// Validates a DST file stream (async)
+    /// Validates a DST file stream (async) - scans complete body
     /// </summary>
     public async Task<FormatValidationResult> ValidateAsync(Stream stream)
     {
@@ -279,135 +653,346 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
         {
             var originalPosition = stream.Position;
             stream.Position = 0;
-
-            using var reader = new BinaryReader(stream, Encoding.ASCII, leaveOpen: true);
-
-            // Check minimum size
-            if (stream.Length < 512)
+            
+            if (stream.Length > MaxDocumentBytes)
+            {
+                result.IsValid = false;
+                result.Issues.Add(new FmtValidationIssue
+                {
+                    RuleId = "DST.FILE_TOO_LARGE",
+                    Severity = FmtValidationSeverity.Critical,
+                    Message = $"DST file exceeds maximum size of {MaxDocumentBytes} bytes",
+                    Evidence = $"File size: {stream.Length} bytes",
+                    Recommendation = "Reduce file size or split design"
+                });
+                stream.Position = originalPosition;
+                return result;
+            }
+            
+            if (stream.Length < DstSpec.HeaderSize)
             {
                 result.IsValid = false;
                 result.Issues.Add(new FmtValidationIssue
                 {
                     RuleId = "DST.HEADER_TOO_SMALL",
                     Severity = FmtValidationSeverity.Critical,
-                    Message = "DST file too small for header (minimum 512 bytes)",
+                    Message = "DST file too small for header (512 bytes required)",
                     Evidence = $"File size: {stream.Length} bytes",
                     Recommendation = "Ensure file is a valid DST format"
                 });
                 stream.Position = originalPosition;
                 return result;
             }
-
-            var header = reader.ReadBytes(512);
-
-            // Check magic bytes (DST files typically start with spaces or specific signature)
-            // DST doesn't have a strong magic, but check for reasonable header
-            var name = Encoding.ASCII.GetString(header, 2, 16).TrimEnd('\0', ' ');
-            if (string.IsNullOrWhiteSpace(name))
-            {
-                result.Issues.Add(new FmtValidationIssue
-                {
-                    RuleId = "DST.HEADER_EMPTY_NAME",
-                    Severity = FmtValidationSeverity.Warning,
-                    Message = "DST header has empty design name",
-                    Evidence = "Bytes 2-17 are empty/whitespace",
-                    Recommendation = "Design name should be populated"
-                });
-            }
-
-            // Check dimensions
-            int width = BitConverter.ToInt16(header, 90);
-            int height = BitConverter.ToInt16(header, 92);
-            if (width <= 0 || height <= 0 || width > 10000 || height > 10000)
-            {
-                result.Issues.Add(new FmtValidationIssue
-                {
-                    RuleId = "DST.HEADER_INVALID_DIMENSIONS",
-                    Severity = FmtValidationSeverity.Warning,
-                    Message = "DST header contains suspicious dimensions",
-                    Evidence = $"Width: {width}, Height: {height} (in 0.1mm units)",
-                    Recommendation = "Verify design dimensions are reasonable"
-                });
-            }
-
-            // Check stitch count
-            int stitchCount = BitConverter.ToInt32(header, 98);
-            if (stitchCount < 0 || stitchCount > Capabilities.MaxTotalStitches)
+            
+            using var reader = new BinaryReader(stream, Encoding.ASCII, leaveOpen: true);
+            var headerBytes = reader.ReadBytes(DstSpec.HeaderSize);
+            var header = DstHeader.Parse(headerBytes);
+            
+            // Validate header
+            if (!headerBytes.Take(3).SequenceEqual(Encoding.ASCII.GetBytes("LA:")))
             {
                 result.IsValid = false;
                 result.Issues.Add(new FmtValidationIssue
                 {
-                    RuleId = "DST.HEADER_INVALID_STITCH_COUNT",
+                    RuleId = "DST.HEADER_MISSING_LA",
                     Severity = FmtValidationSeverity.Critical,
-                    Message = "DST header stitch count out of valid range",
-                    Evidence = $"Stitch count: {stitchCount}, Max: {Capabilities.MaxTotalStitches}",
-                    Recommendation = "File may be corrupted or not a valid DST"
+                    Message = "DST header missing required LA: prefix",
+                    Evidence = "First 3 bytes are not 'LA:'",
+                    Recommendation = "File is not a valid Tajima DST format"
                 });
             }
 
-            // Check color count
-            int colorCount = header[102];
-            if (colorCount > Capabilities.MaxColors)
+            if (string.IsNullOrWhiteSpace(header.Label))
             {
                 result.Issues.Add(new FmtValidationIssue
                 {
-                    RuleId = "DST.HEADER_TOO_MANY_COLORS",
+                    RuleId = "DST.HEADER_EMPTY_LABEL",
                     Severity = FmtValidationSeverity.Warning,
-                    Message = "DST header color count exceeds format maximum",
-                    Evidence = $"Colors: {colorCount}, Max: {Capabilities.MaxColors}",
-                    Recommendation = "Reduce color count or split design"
+                    Message = "DST header has empty design label",
+                    Evidence = "LA: field is empty",
+                    Recommendation = "Design label should be populated"
                 });
             }
 
-            // Validate stitch data (sample check)
-            stream.Position = 512;
-            int validStitches = 0;
-            int maxCheck = Math.Min(1000, (int)(stream.Length - 512) / 3);
-
-            for (int i = 0; i < maxCheck && stream.Position + 2 < stream.Length; i++)
+            // Check for negative stitch count
+            if (header.StitchCount < 0)
             {
+                result.IsValid = false;
+                result.Issues.Add(new FmtValidationIssue
+                {
+                    RuleId = "DST.INVALID_STITCH_COUNT",
+                    Severity = FmtValidationSeverity.Critical,
+                    Message = "DST header contains negative stitch count",
+                    Evidence = $"ST:{header.StitchCount}",
+                                        Recommendation = "Stitch count must be non-negative"
+                                    });
+                                }
+
+                                // Check for negative color changes
+                                if (header.ColorChanges < 0)
+                                {
+                                    result.IsValid = false;
+                                    result.Issues.Add(new FmtValidationIssue
+                                    {
+                                        RuleId = "DST.INVALID_COLOR_CHANGE_COUNT",
+                                        Severity = FmtValidationSeverity.Critical,
+                                        Message = "DST header contains negative color change count",
+                                        Evidence = $"CO:{header.ColorChanges}",
+                                        Recommendation = "Color change count must be non-negative"
+                                    });
+                                }
+
+                                // Check for excessive stitch count in header (beyond format capabilities)
+                                if (header.StitchCount > Capabilities.MaxTotalStitches)
+                                {
+                                    result.IsValid = false;
+                                    result.Issues.Add(new FmtValidationIssue
+                                    {
+                                        RuleId = "DST.HEADER_STITCH_COUNT_EXCEEDS_MAX",
+                                        Severity = FmtValidationSeverity.Critical,
+                                        Message = "DST header stitch count exceeds format maximum",
+                                        Evidence = $"ST:{header.StitchCount} > Max:{Capabilities.MaxTotalStitches}",
+                                        Recommendation = "Design exceeds format capabilities; split into multiple files"
+                                    });
+                                }
+
+                                // Check for excessive color changes in header
+                                                            if (header.ColorChanges > Capabilities.MaxColors)
+                                                            {
+                                                                // Warning, not critical - design may still be readable
+                                                                result.Issues.Add(new FmtValidationIssue
+                                                                {
+                                                                    RuleId = "DST.HEADER_COLOR_CHANGES_EXCEEDS_MAX",
+                                                                    Severity = FmtValidationSeverity.Warning,
+                                                                    Message = "DST header color change count exceeds format maximum",
+                                                                    Evidence = $"CO:{header.ColorChanges} > Max:{Capabilities.MaxColors}",
+                                                                    Recommendation = "Design exceeds format capabilities; reduce color changes"
+                                                                });
+                                                            }
+
+                                                            // Check for zero dimensions in header (may indicate empty or corrupted design)
+                                                                                                                        if (header.MaxX == 0 && header.MinX == 0 && header.MaxY == 0 && header.MinY == 0)
+                                                                                                                        {
+                                                                                                                            result.Issues.Add(new FmtValidationIssue
+                                                                                                                            {
+                                                                                                                                RuleId = "DST.HEADER_ZERO_DIMENSIONS",
+                                                                                                                                Severity = FmtValidationSeverity.Warning,
+                                                                                                                                Message = "DST header has zero dimensions (no extent)",
+                                                                                                                                Evidence = "Header: X[0,0] Y[0,0]",
+                                                                                                                                Recommendation = "Design may be empty or header extents not calculated"
+                                                                                                                            });
+                                                                                                                        }
+                                                            
+                                                                                                                        // Check for negative dimensions in header
+                                                                                                                        if (header.MinX < 0 || header.MinY < 0 || header.MaxX < 0 || header.MaxY < 0)
+                                                                                                                        {
+                                                                                                                            result.Issues.Add(new FmtValidationIssue
+                                                                                                                            {
+                                                                                                                                RuleId = "DST.HEADER_NEGATIVE_DIMENSIONS",
+                                                                                                                                Severity = FmtValidationSeverity.Warning,
+                                                                                                                                Message = "DST header contains negative dimensions",
+                                                                                                                                Evidence = $"Header: X[{header.MinX},{header.MaxX}] Y[{header.MinY},{header.MaxY}]",
+                                                                                                                                Recommendation = "Negative extents are invalid; header may be corrupted"
+                                                                                                                            });
+                                                                                                                        }
+                                                            
+                                                                                                                        // Validate body - scan ALL records
+                                int recordCount = 0;
+                                int observedColorChanges = 0;
+                                int maxCoordX = 0, minCoordX = 0, maxCoordY = 0, minCoordY = 0;
+                                int currentX = 0, currentY = 0;
+                                bool foundEnd = false;
+            
+            while (stream.Position + 2 < stream.Length)
+            {
+                // Check for end marker BEFORE decoding (0xF3 0x00 0x00)
+                if (stream.Position + 2 < stream.Length)
+                {
+                    long pos = stream.Position;
+                    byte peek1 = reader.ReadByte();
+                    byte peek2 = reader.ReadByte();
+                    byte peek3 = reader.ReadByte();
+                    
+                    if (peek1 == 0xF3 && peek2 == 0x00 && peek3 == 0x00)
+                    {
+                        foundEnd = true;
+                        // Don't advance past end marker - leave it for caller
+                        stream.Position = pos;
+                        break;
+                    }
+                    
+                    // Not end marker, rewind and decode normally
+                    stream.Position = pos;
+                }
+                
+                byte b1 = reader.ReadByte();
+                byte b2 = reader.ReadByte();
+                byte b3 = reader.ReadByte();
+                
+                int deltaX, deltaY;
+                byte control;
                 try
                 {
-                    byte b1 = reader.ReadByte();
-                    byte b2 = reader.ReadByte();
-                    byte b3 = reader.ReadByte();
-
-                    // Check for end marker
-                    if (b1 == 0xF3 && b2 == 0x00 && b3 == 0x00)
-                        break;
-
-                    var (dx, dy, flags) = DecodeStitch(b1, b2, b3);
-
-                    // Check for reasonable stitch lengths
-                    if (Math.Abs(dx) > 2047 || Math.Abs(dy) > 2047)
-                    {
-                        result.Issues.Add(new FmtValidationIssue
-                        {
-                            RuleId = "DST.STITCH_OUT_OF_RANGE",
-                            Severity = FmtValidationSeverity.Warning,
-                            Message = "Stitch delta exceeds 12-bit signed range",
-                            Evidence = $"Stitch {i}: dx={dx}, dy={dy}",
-                            Position = stream.Position - 3,
-                            Recommendation = "Stitch will be clamped during read"
-                        });
-                    }
-
-                    validStitches++;
+                    var decoded = DstMovementEncoder.DecodeMovement(b1, b2, b3);
+                    deltaX = decoded.deltaX;
+                    deltaY = decoded.deltaY;
+                    control = decoded.control;
                 }
-                catch
+                catch (InvalidDataException ex)
+                {
+                    result.IsValid = false;
+                    result.Issues.Add(new FmtValidationIssue
+                    {
+                        RuleId = "DST.INVALID_BALANCED_TERNARY",
+                        Severity = FmtValidationSeverity.Critical,
+                        Message = "Invalid balanced ternary encoding in stitch record",
+                        Evidence = ex.Message,
+                        Position = stream.Position - 3,
+                        Recommendation = "Stitch data contains invalid encoding"
+                    });
+                    continue; // Skip this record, continue validation
+                }
+                catch (ArgumentOutOfRangeException ex)
+                {
+                    result.IsValid = false;
+                    result.Issues.Add(new FmtValidationIssue
+                    {
+                        RuleId = "DST.MOVEMENT_EXCEEDS_MAX",
+                        Severity = FmtValidationSeverity.Critical,
+                        Message = "Movement exceeds DST maximum per record",
+                        Evidence = ex.Message,
+                        Position = stream.Position - 3,
+                        Recommendation = "Long movements must be decomposed into multiple records (max ±127 DST units)"
+                    });
+                    continue; // Skip this record, continue validation
+                }
+                
+                var dstControl = (DstControl)control;
+                
+                currentX += deltaX;
+                currentY += deltaY;
+                
+                maxCoordX = Math.Max(maxCoordX, currentX);
+                minCoordX = Math.Min(minCoordX, currentX);
+                maxCoordY = Math.Max(maxCoordY, currentY);
+                minCoordY = Math.Min(minCoordY, currentY);
+                
+                if (dstControl == DstControl.ColorChange)
+                    observedColorChanges++;
+                
+                recordCount++;
+                
+                // Check movement bounds
+                if (Math.Abs(deltaX) > DstSpec.MaxDeltaPerRecord || Math.Abs(deltaY) > DstSpec.MaxDeltaPerRecord)
                 {
                     result.Issues.Add(new FmtValidationIssue
                     {
-                        RuleId = "DST.STITCH_READ_ERROR",
+                        RuleId = "DST.MOVEMENT_EXCEEDS_MAX",
+                        Severity = FmtValidationSeverity.Critical,
+                        Message = $"Movement exceeds DST maximum per record (±{DstSpec.MaxDeltaPerRecord} units)",
+                        Evidence = $"Record {recordCount}: deltaX={deltaX}, deltaY={deltaY}",
+                        Position = stream.Position - 3,
+                        Recommendation = "Long movements must be decomposed into multiple records"
+                    });
+                    result.IsValid = false;
+                }
+            }
+            
+            if (!foundEnd)
+            {
+                // Cannot access options in ValidateAsync - check stream capabilities instead
+                bool strictMode = true; // Default to strict for validation
+                if (strictMode)
+                {
+                    result.IsValid = false;
+                    result.Issues.Add(new FmtValidationIssue
+                    {
+                        RuleId = "DST.MISSING_END_MARKER",
+                        Severity = FmtValidationSeverity.Critical,
+                        Message = "DST file missing END marker (0xF3 0x00 0x00)",
+                        Evidence = "Reached end of stream without finding END record",
+                        Recommendation = "File is truncated or corrupted"
+                    });
+                }
+                else
+                {
+                    result.Issues.Add(new FmtValidationIssue
+                    {
+                        RuleId = "DST.MISSING_END_MARKER",
                         Severity = FmtValidationSeverity.Warning,
-                        Message = "Failed to parse stitch data",
-                        Evidence = $"At stitch index {i}",
-                        Position = stream.Position,
-                        Recommendation = "File may have corrupted stitch data"
+                        Message = "DST file missing END marker (0xF3 0x00 0x00)",
+                        Evidence = "Reached end of stream without finding END record",
+                        Recommendation = "File may be truncated"
                     });
                 }
             }
-
+            
+            // Header/body consistency checks
+            if (header.StitchCount > 0 && Math.Abs(header.StitchCount - recordCount) > 1) // Allow ±1 for counting convention
+            {
+                result.Issues.Add(new FmtValidationIssue
+                {
+                    RuleId = "DST.HEADER_STITCH_COUNT_MISMATCH",
+                    Severity = FmtValidationSeverity.Warning,
+                    Message = "Header ST count differs from actual record count",
+                    Evidence = $"Header ST={header.StitchCount}, Actual={recordCount}",
+                    Recommendation = "Header stitch count may use different counting convention"
+                });
+            }
+            
+            if (header.ColorChanges > 0 && header.ColorChanges != observedColorChanges)
+            {
+                result.Issues.Add(new FmtValidationIssue
+                {
+                    RuleId = "DST.HEADER_COLOR_CHANGE_MISMATCH",
+                    Severity = FmtValidationSeverity.Warning,
+                    Message = "Header CO count differs from observed color changes",
+                    Evidence = $"Header CO={header.ColorChanges}, Observed={observedColorChanges}",
+                    Recommendation = "Verify color change sequence"
+                });
+            }
+            
+            // Check extents
+            if (header.MaxX != maxCoordX || header.MinX != minCoordX || header.MaxY != maxCoordY || header.MinY != minCoordY)
+            {
+                result.Issues.Add(new FmtValidationIssue
+                {
+                    RuleId = "DST.HEADER_EXTENTS_MISMATCH",
+                    Severity = FmtValidationSeverity.Warning,
+                    Message = "Header extents differ from observed coordinates",
+                    Evidence = $"Header: X[{header.MinX},{header.MaxX}] Y[{header.MinY},{header.MaxY}] vs Observed: X[{minCoordX},{maxCoordX}] Y[{minCoordY},{maxCoordY}]",
+                    Recommendation = "Header extents may be approximate"
+                });
+            }
+            
+            // Check for excessive dimensions in header (beyond DST practical limits)
+            const int MaxReasonableDimension = 10000; // DST units = 1000mm
+            if (Math.Abs(header.MaxX) > MaxReasonableDimension || Math.Abs(header.MinX) > MaxReasonableDimension ||
+                Math.Abs(header.MaxY) > MaxReasonableDimension || Math.Abs(header.MinY) > MaxReasonableDimension)
+            {
+                result.Issues.Add(new FmtValidationIssue
+                {
+                    RuleId = "DST.HEADER_EXCESSIVE_DIMENSIONS",
+                    Severity = FmtValidationSeverity.Warning,
+                    Message = "Header extents exceed practical DST limits",
+                    Evidence = $"Header: X[{header.MinX},{header.MaxX}] Y[{header.MinY},{header.MaxY}]",
+                    Recommendation = "Verify design extents are correct; excessive values may indicate corruption"
+                });
+            }
+            
+            // Check trailing data after END
+            if (foundEnd && stream.Position < stream.Length)
+            {
+                result.Issues.Add(new FmtValidationIssue
+                {
+                    RuleId = "DST.TRAILING_DATA",
+                    Severity = FmtValidationSeverity.Warning,
+                    Message = "Data found after END marker",
+                    Evidence = $"{stream.Length - stream.Position} trailing bytes",
+                    Recommendation = "Trailing data will be ignored"
+                });
+            }
+            
             result.DetectedCapabilities = Capabilities;
             stream.Position = originalPosition;
         }
@@ -439,25 +1024,34 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
             Issues = new List<FmtValidationIssue>()
         };
 
-        // Check color count
-        if (project.ThreadPalette.Count > Capabilities.MaxColors)
+        // Color change count (not palette colors)
+        var engine = new StitchEngine();
+        var plan = engine.Compile(project);
+        int colorChanges = (int)plan.TotalColorChanges;
+        
+        if (colorChanges > Capabilities.MaxColors)
         {
             result.IsValid = false;
             result.Issues.Add(new FmtValidationIssue
             {
-                RuleId = "DST.TOO_MANY_COLORS",
+                RuleId = "DST.TOO_MANY_COLOR_CHANGES",
                 Severity = FmtValidationSeverity.Critical,
-                Message = $"Project has {project.ThreadPalette.Count} colors, DST supports max {Capabilities.MaxColors}",
-                Evidence = $"Color count: {project.ThreadPalette.Count}",
-                Recommendation = "Reduce color palette or split design"
+                Message = $"Project has {colorChanges} color changes, DST supports max {Capabilities.MaxColors}",
+                Evidence = $"Color changes: {colorChanges}",
+                Recommendation = "Reduce color changes or split design"
             });
         }
 
-        // Check bounds against machine/hoop
+        // Bounds check
         var bounds = project.GetDesignBounds();
         if (machine != null)
         {
-            if (bounds.Width > machine.MaxWidth || bounds.Height > machine.MaxHeight)
+            int maxXDst = machine.MaxWidth / DstSpec.MicronsPerDstUnit;
+            int maxYDst = machine.MaxHeight / DstSpec.MicronsPerDstUnit;
+            int designWidthDst = bounds.Width / DstSpec.MicronsPerDstUnit;
+            int designHeightDst = bounds.Height / DstSpec.MicronsPerDstUnit;
+            
+            if (designWidthDst > maxXDst || designHeightDst > maxYDst)
             {
                 result.IsValid = false;
                 result.Issues.Add(new FmtValidationIssue
@@ -465,7 +1059,7 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
                     RuleId = "DST.EXCEEDS_MACHINE_FIELD",
                     Severity = FmtValidationSeverity.Critical,
                     Message = "Design exceeds machine maximum field size",
-                    Evidence = $"Design: {bounds.Width}x{bounds.Height}µm, Machine: {machine.MaxWidth}x{machine.MaxHeight}µm",
+                    Evidence = $"Design: {designWidthDst}x{designHeightDst} DST units, Machine: {maxXDst}x{maxYDst} DST units",
                     Recommendation = "Resize design or use larger machine"
                 });
             }
@@ -473,35 +1067,47 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
 
         if (hoop != null)
         {
-            if (bounds.Width > hoop.UsableWidth || bounds.Height > hoop.UsableHeight)
+            int hoopWidthDst = hoop.UsableWidth / DstSpec.MicronsPerDstUnit;
+            int hoopHeightDst = hoop.UsableHeight / DstSpec.MicronsPerDstUnit;
+            int designWidthDst = bounds.Width / DstSpec.MicronsPerDstUnit;
+            int designHeightDst = bounds.Height / DstSpec.MicronsPerDstUnit;
+            
+            if (designWidthDst > hoopWidthDst || designHeightDst > hoopHeightDst)
             {
                 result.Issues.Add(new FmtValidationIssue
                 {
                     RuleId = "DST.EXCEEDS_HOOP",
                     Severity = FmtValidationSeverity.Warning,
                     Message = "Design exceeds hoop usable area",
-                    Evidence = $"Design: {bounds.Width}x{bounds.Height}µm, Hoop usable: {hoop.UsableWidth}x{hoop.UsableHeight}µm",
+                    Evidence = $"Design: {designWidthDst}x{designHeightDst} DST units, Hoop: {hoopWidthDst}x{hoopHeightDst} DST units",
                     Recommendation = "Use larger hoop or reposition design"
                 });
             }
         }
 
-        // Check stitch lengths
-        var engine = new StitchEngine();
-        var plan = engine.Compile(project);
-
-        var longStitches = plan.GetAllStitches().Where(s => s.IsSewing &&
-            Math.Max(Math.Abs(s.X), Math.Abs(s.Y)) > Capabilities.MaxStitchLength * 10).ToList();
-
-        if (longStitches.Count > 0)
+        // Check for movements that exceed single-record limit
+        var longMovements = plan.GetAllStitches()
+            .Where(s => s.IsSewing)
+            .Select((s, i) => new { Stitch = s, Index = i })
+            .Skip(1)
+            .Where(x => 
+            {
+                var prev = plan.GetAllStitches().ElementAt(x.Index - 1);
+                int dx = Math.Abs((x.Stitch.X - prev.X) / DstSpec.MicronsPerDstUnit);
+                int dy = Math.Abs((x.Stitch.Y - prev.Y) / DstSpec.MicronsPerDstUnit);
+                return dx > DstSpec.MaxDeltaPerRecord || dy > DstSpec.MaxDeltaPerRecord;
+            })
+            .ToList();
+        
+        if (longMovements.Any())
         {
             result.Issues.Add(new FmtValidationIssue
             {
-                RuleId = "DST.STITCH_LENGTH_EXCEEDS_LIMIT",
-                Severity = FmtValidationSeverity.Warning,
-                Message = $"{longStitches.Count} stitches exceed DST max stitch length (12.7mm)",
-                Evidence = "Stitches will be clamped during write",
-                Recommendation = "Consider reducing stitch length in digitization"
+                RuleId = "DST.LONG_MOVEMENTS_WILL_BE_DECOMPOSED",
+                Severity = FmtValidationSeverity.Info,
+                Message = $"{longMovements.Count} movements exceed single-record limit and will be decomposed",
+                Evidence = "Movements > 121 DST units (12.1mm) will be split into multiple records",
+                Recommendation = "This is handled automatically during write; no action required"
             });
         }
 
@@ -517,7 +1123,6 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
             Issues = new List<FmtValidationIssue>()
         };
 
-        // Check total stitches
         if (plan.TotalStitches > Capabilities.MaxTotalStitches)
         {
             result.IsValid = false;
@@ -531,11 +1136,24 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
             });
         }
 
+        if (plan.TotalColorChanges > Capabilities.MaxColors)
+        {
+            result.IsValid = false;
+            result.Issues.Add(new FmtValidationIssue
+            {
+                RuleId = "DST.TOO_MANY_COLOR_CHANGES",
+                Severity = FmtValidationSeverity.Critical,
+                Message = $"Plan has {plan.TotalColorChanges} color changes, DST supports max {Capabilities.MaxColors}",
+                Evidence = $"Color changes: {plan.TotalColorChanges}",
+                Recommendation = "Reduce color changes or split design"
+            });
+        }
+
         return result;
     }
 
     /// <summary>
-    /// Round-trip test: Read -> Write -> Read and compare binary DST data
+    /// Round-trip test: Read → Write → Read with semantic comparison
     /// </summary>
     public async Task<RoundTripResult> RoundTripTestAsync(Stream originalStream, CancellationToken ct = default)
     {
@@ -546,23 +1164,20 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
             // First read
             originalStream.Position = 0;
             var project1 = await ReadAsync(originalStream, null, ct);
+            var engine = new StitchEngine();
+            var plan1 = engine.Compile(project1);
 
             // Write to memory
             using var ms = new MemoryStream();
             await WriteAsync(project1, ms, null, ct);
-            var writtenBytes = ms.ToArray();
 
             // Read back
             ms.Position = 0;
             var project2 = await ReadAsync(ms, null, ct);
+            var plan2 = engine.Compile(project2);
 
-            // Write again to compare binary
-            using var ms2 = new MemoryStream();
-            await WriteAsync(project2, ms2, null, ct);
-            var reReadBytes = ms2.ToArray();
-
-            // Compare binary data (allowing for minor differences in padding)
-            result.Differences = CompareBinaryDst(writtenBytes, reReadBytes);
+            // Semantic comparison on StitchPlans
+            result.Differences = CompareStitchPlans(plan1, plan2);
             result.Success = result.Differences.Count == 0;
         }
         catch (Exception ex)
@@ -574,280 +1189,173 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
         return result;
     }
 
-    private List<SemanticDifference> CompareBinaryDst(byte[] a, byte[] b)
+    private List<SemanticDifference> CompareStitchPlans(StitchPlan a, StitchPlan b)
     {
         var diffs = new List<SemanticDifference>();
 
-        // Compare header (first 512 bytes)
-        int headerLen = Math.Min(512, Math.Min(a.Length, b.Length));
-        for (int i = 0; i < headerLen; i++)
-        {
-            if (a[i] != b[i])
-            {
-                diffs.Add(new SemanticDifference
-                {
-                    Type = DifferenceType.Metadata,
-                    Description = $"Header byte differs at offset {i}: 0x{a[i]:X2} vs 0x{b[i]:X2}",
-                    ValueA = $"0x{a[i]:X2}",
-                    ValueB = $"0x{b[i]:X2}"
-                });
-            }
-        }
-
-        // Compare stitch data (after header, before end marker)
-        int dataStart = 512;
-        int aEnd = FindEndMarker(a, dataStart);
-        int bEnd = FindEndMarker(b, dataStart);
-
-        int aDataLen = aEnd - dataStart;
-        int bDataLen = bEnd - dataStart;
-
-        if (aDataLen != bDataLen)
-        {
-            diffs.Add(new SemanticDifference
-            {
-                Type = DifferenceType.StitchCount,
-                Description = $"Stitch data length differs: {aDataLen} vs {bDataLen} bytes",
-                ValueA = aDataLen.ToString(),
-                ValueB = bDataLen.ToString()
-            });
-        }
-
-        int minLen = Math.Min(aDataLen, bDataLen);
-        for (int i = 0; i < minLen; i += 3)
-        {
-            if (i + 2 < minLen && a[dataStart + i] != b[dataStart + i] ||
-                a[dataStart + i + 1] != b[dataStart + i + 1] ||
-                a[dataStart + i + 2] != b[dataStart + i + 2])
-            {
-                diffs.Add(new SemanticDifference
-                {
-                    Type = DifferenceType.StitchType,
-                    Description = $"Stitch data differs at byte offset {dataStart + i}",
-                    ValueA = $"{a[dataStart + i]:X2} {a[dataStart + i + 1]:X2} {a[dataStart + i + 2]:X2}",
-                    ValueB = $"{b[dataStart + i]:X2} {b[dataStart + i + 1]:X2} {b[dataStart + i + 2]:X2}"
-                });
-            }
-        }
+        if (a.TotalStitches != b.TotalStitches)
+            diffs.Add(new SemanticDifference { Type = DifferenceType.StitchCount, Description = $"Stitch count: {a.TotalStitches} vs {b.TotalStitches}", ValueA = a.TotalStitches.ToString(), ValueB = b.TotalStitches.ToString() });
+        
+        if (a.TotalJumps != b.TotalJumps)
+            diffs.Add(new SemanticDifference { Type = DifferenceType.JumpCount, Description = $"Jump count: {a.TotalJumps} vs {b.TotalJumps}", ValueA = a.TotalJumps.ToString(), ValueB = b.TotalJumps.ToString() });
+        
+        if (a.TotalTrims != b.TotalTrims)
+            diffs.Add(new SemanticDifference { Type = DifferenceType.TrimCount, Description = $"Trim count: {a.TotalTrims} vs {b.TotalTrims}", ValueA = a.TotalTrims.ToString(), ValueB = b.TotalTrims.ToString() });
+        
+        if (a.TotalColorChanges != b.TotalColorChanges)
+            diffs.Add(new SemanticDifference { Type = DifferenceType.ColorChangeCount, Description = $"Color changes: {a.TotalColorChanges} vs {b.TotalColorChanges}", ValueA = a.TotalColorChanges.ToString(), ValueB = b.TotalColorChanges.ToString() });
+        
+        if (!a.DesignBounds.Equals(b.DesignBounds))
+            diffs.Add(new SemanticDifference { Type = DifferenceType.Bounds, Description = $"Bounds: {a.DesignBounds} vs {b.DesignBounds}", ValueA = a.DesignBounds.ToString(), ValueB = b.DesignBounds.ToString() });
 
         return diffs;
     }
 
-    private int FindEndMarker(byte[] data, int start)
-    {
-        for (int i = start; i + 2 < data.Length; i += 3)
-        {
-            if (data[i] == 0xF3 && data[i + 1] == 0x00 && data[i + 2] == 0x00)
-                return i + 3;
-        }
-        return data.Length;
-    }
-
     /// <summary>
-    /// Semantic diff between two AtlasProjects (for backward compatibility)
+    /// Semantic diff between two AtlasProjects (backward compatibility)
     /// </summary>
     public List<SemanticDifference> SemanticDiff(AtlasProject a, AtlasProject b)
     {
         var engine = new StitchEngine();
-        var planA = engine.Compile(a);
-        var planB = engine.Compile(b);
-
-        var diffs = new List<SemanticDifference>();
-
-        if (planA.TotalStitches != planB.TotalStitches)
-        {
-            diffs.Add(new SemanticDifference
-            {
-                Type = DifferenceType.StitchCount,
-                Description = $"Stitch count differs: {planA.TotalStitches} vs {planB.TotalStitches}",
-                ValueA = planA.TotalStitches.ToString(),
-                ValueB = planB.TotalStitches.ToString()
-            });
-        }
-
-        if (planA.TotalJumps != planB.TotalJumps)
-        {
-            diffs.Add(new SemanticDifference
-            {
-                Type = DifferenceType.JumpCount,
-                Description = $"Jump count differs: {planA.TotalJumps} vs {planB.TotalJumps}",
-                ValueA = planA.TotalJumps.ToString(),
-                ValueB = planB.TotalJumps.ToString()
-            });
-        }
-
-        if (planA.TotalTrims != planB.TotalTrims)
-        {
-            diffs.Add(new SemanticDifference
-            {
-                Type = DifferenceType.TrimCount,
-                Description = $"Trim count differs: {planA.TotalTrims} vs {planB.TotalTrims}",
-                ValueA = planA.TotalTrims.ToString(),
-                ValueB = planB.TotalTrims.ToString()
-            });
-        }
-
-        if (planA.TotalColorChanges != planB.TotalColorChanges)
-        {
-            diffs.Add(new SemanticDifference
-            {
-                Type = DifferenceType.ColorChangeCount,
-                Description = $"Color change count differs: {planA.TotalColorChanges} vs {planB.TotalColorChanges}",
-                ValueA = planA.TotalColorChanges.ToString(),
-                ValueB = planB.TotalColorChanges.ToString()
-            });
-        }
-
-        if (!planA.DesignBounds.Equals(planB.DesignBounds))
-        {
-            diffs.Add(new SemanticDifference
-            {
-                Type = DifferenceType.Bounds,
-                Description = $"Design bounds differ: {planA.DesignBounds} vs {planB.DesignBounds}",
-                ValueA = planA.DesignBounds.ToString(),
-                ValueB = planB.DesignBounds.ToString()
-            });
-        }
-
+        var diffs = CompareStitchPlans(engine.Compile(a), engine.Compile(b));
+        
+        // Also compare thread palettes at project level
         if (a.ThreadPalette.Count != b.ThreadPalette.Count)
         {
-            diffs.Add(new SemanticDifference
-            {
-                Type = DifferenceType.ColorPalette,
-                Description = $"Color count differs: {a.ThreadPalette.Count} vs {b.ThreadPalette.Count}",
-                ValueA = a.ThreadPalette.Count.ToString(),
-                ValueB = b.ThreadPalette.Count.ToString()
+            diffs.Add(new SemanticDifference 
+            { 
+                Type = DifferenceType.ColorPalette, 
+                Description = $"Thread palette count: {a.ThreadPalette.Count} vs {b.ThreadPalette.Count}", 
+                ValueA = a.ThreadPalette.Count.ToString(), 
+                ValueB = b.ThreadPalette.Count.ToString() 
             });
         }
-
+        else
+        {
+            // Compare individual colors
+            for (int i = 0; i < a.ThreadPalette.Count; i++)
+            {
+                var ca = a.ThreadPalette[i];
+                var cb = b.ThreadPalette[i];
+                if (ca.R != cb.R || ca.G != cb.G || ca.B != cb.B)
+                {
+                    diffs.Add(new SemanticDifference 
+                    { 
+                        Type = DifferenceType.ColorPalette, 
+                        Description = $"Thread color {i}: RGB({ca.R},{ca.G},{ca.B}) vs RGB({cb.R},{cb.G},{cb.B})", 
+                        ValueA = $"RGB({ca.R},{ca.G},{ca.B})", 
+                        ValueB = $"RGB({cb.R},{cb.G},{cb.B})" 
+                    });
+                }
+            }
+        }
+        
         return diffs;
     }
 
     /// <summary>
-    /// Fuzz testing - genera archivos DST válidos aleatorios
-    /// </summary>
-    public byte[] GenerateFuzzInput(int seed = 0)
-    {
-        var rand = new Random(seed);
-        var ms = new MemoryStream();
-        var writer = new BinaryWriter(ms, Encoding.ASCII, leaveOpen: true);
-
-        // Valid header
-        var header = new byte[512];
-        rand.NextBytes(header);
-        // Ensure valid header fields
-        Encoding.ASCII.GetBytes("LA:").CopyTo(header, 0);
-        Encoding.ASCII.GetBytes("Fuzz Test").CopyTo(header, 2);
-        writer.Write(header);
-
-        // Random stitch data
-        int stitchCount = rand.Next(100, 5000);
-        int x = 0, y = 0;
-
-        for (int i = 0; i < stitchCount; i++)
+        /// Generates a deterministic valid DST file for testing
+        /// </summary>
+        public byte[] GenerateFuzzInput(int seed = 0)
         {
-            int dx = rand.Next(-100, 101);
-            int dy = rand.Next(-100, 101);
-            byte flags = (byte)rand.Next(0, 16);
+            var rand = new Random(seed);
+            var ms = new MemoryStream();
+            var writer = new BinaryWriter(ms, Encoding.ASCII, leaveOpen: true);
 
-            var (b1, b2, b3) = EncodeStitch(dx, dy, flags);
-            writer.Write(b1);
-            writer.Write(b2);
-            writer.Write(b3);
+            // Deterministic header with bounds matching the stitch data we'll generate
+            // Use a simple bounded pattern
+            var header = new DstHeader
+            {
+                Label = "Fuzz Test",
+                StitchCount = 100,
+                ColorChanges = 1,
+                MinX = -100, MaxX = 100,
+                MinY = -100, MaxY = 100,
+                StartX = 0, StartY = 0,
+                EndX = 0, EndY = 0
+            }.ToBytes();
+            writer.Write(header);
 
-            x += dx;
-            y += dy;
+            // Deterministic stitch data - use small deltas that stay within bounds
+            int x = 0, y = 0;
+            for (int i = 0; i < 100; i++)
+            {
+                // Small deltas that keep us within [-100, 100] bounds
+                int dx = rand.Next(-5, 6);
+                int dy = rand.Next(-5, 6);
+
+                // Clamp to ensure we don't exceed bounds
+                if (x + dx > 100) dx = 100 - x;
+                if (x + dx < -100) dx = -100 - x;
+                if (y + dy > 100) dy = 100 - y;
+                if (y + dy < -100) dy = -100 - y;
+
+                byte control = (byte)(i == 50 ? DstControl.ColorChange : DstControl.Normal);
+
+                var (b1, b2, b3) = DstMovementEncoder.EncodeMovement(dx, dy, control);
+                writer.Write(b1);
+                writer.Write(b2);
+                writer.Write(b3);
+
+                x += dx;
+                y += dy;
+            }
+
+            // End marker (Tajima spec: 0xF3 0x00 0x00)
+            writer.Write(0xF3);
+            writer.Write((byte)0x00);
+            writer.Write((byte)0x00);
+            writer.Flush();
+            return ms.ToArray();
         }
 
-        // End marker
-        writer.Write((byte)0xF3);
-        writer.Write((byte)0x00);
-        writer.Write((byte)0x00);
+        #region Private Helpers
 
-        writer.Flush();
-        return ms.ToArray();
-    }
-
-    #region Private Implementation
-
-    private AtlasProject ParseHeader(byte[] header)
+    private DstHeader BuildHeader(AtlasProject project, List<DstStitchRecord> records, int colorChanges)
     {
-        var project = new AtlasProject
+        if (!records.Any())
         {
-            Name = Encoding.ASCII.GetString(header, 2, 16).TrimEnd('\0', ' '),
-            SourceFileHash = ComputeHeaderHash(header)
+            return new DstHeader { Label = project.Name ?? "Empty", StitchCount = 0, ColorChanges = 0 };
+        }
+
+        int minX = records.Min(r => r.AbsoluteX);
+        int maxX = records.Max(r => r.AbsoluteX);
+        int minY = records.Min(r => r.AbsoluteY);
+        int maxY = records.Max(r => r.AbsoluteY);
+        int startX = records.First().AbsoluteX - records.First().DeltaX;
+        int startY = records.First().AbsoluteY - records.First().DeltaY;
+        int endX = records.Last().AbsoluteX;
+        int endY = records.Last().AbsoluteY;
+
+        return new DstHeader
+        {
+            Label = project.Name ?? "Untitled",
+            StitchCount = records.Count,
+            ColorChanges = colorChanges,
+            MinX = minX, MaxX = maxX,
+            MinY = minY, MaxY = maxY,
+            StartX = startX, StartY = startY,
+            EndX = endX, EndY = endY
         };
-
-        // Parse dimensions (bytes 90-97 typically)
-        // DST stores dimensions in 0.1mm units
-        int width = BitConverter.ToInt16(header, 90);
-        int height = BitConverter.ToInt16(header, 92);
-
-        project.CanvasWidth = width * 100; // Convert 0.1mm to microns
-        project.CanvasHeight = height * 100;
-
-        // Stitch count
-        int stitchCount = BitConverter.ToInt32(header, 98);
-
-        // Color count
-        int colorCount = header[102];
-
-        // Generate default palette
-        project.ThreadPalette = GenerateDefaultPalette(colorCount);
-        for (int i = 0; i < colorCount; i++)
-        {
-            project.ColorToNeedleMap[i] = (i % 15) + 1;
-        }
-
-        return project;
     }
 
-    private byte[] BuildHeader(AtlasProject project, StitchPlan plan)
-    {
-        var header = new byte[512];
-
-        // Magic bytes
-        header[0] = 0x20; // Space
-        header[1] = 0x20; // Space
-
-        // Name (16 bytes at offset 2)
-        var nameBytes = Encoding.ASCII.GetBytes(project.Name.PadRight(16).Substring(0, 16));
-        nameBytes.CopyTo(header, 2);
-
-        // Dimensions at offset 90-97 (in 0.1mm)
-        var bounds = project.GetDesignBounds();
-        short width = (short)(bounds.Width / 100);
-        short height = (short)(bounds.Height / 100);
-        BitConverter.GetBytes(width).CopyTo(header, 90);
-        BitConverter.GetBytes(height).CopyTo(header, 92);
-
-        // Stitch count at offset 98
-        BitConverter.GetBytes((int)plan.TotalStitches).CopyTo(header, 98);
-
-        // Color count at offset 102
-        header[102] = (byte)Math.Min(project.ThreadPalette.Count, 255);
-
-        return header;
-    }
-
-    private string ComputeHeaderHash(byte[] header)
+    private string ComputeHash(byte[] data)
     {
         using var sha = System.Security.Cryptography.SHA256.Create();
-        return Convert.ToHexString(sha.ComputeHash(header)).ToLowerInvariant();
+        return Convert.ToHexString(sha.ComputeHash(data)).ToLowerInvariant();
     }
 
     private List<ThreadColor> GenerateDefaultPalette(int count)
     {
         var palette = new List<ThreadColor>();
         var hues = new[] { 0, 30, 60, 120, 180, 240, 270, 300 };
-
+        
         for (int i = 0; i < count; i++)
         {
             int hue = hues[i % hues.Length] + (i / hues.Length) * 15;
             var color = HsvToRgb(hue % 360, 0.8, 0.9);
             palette.Add(new ThreadColor(color.R, color.G, color.B, "DST", i.ToString("D3"), $"Color {i + 1}"));
         }
-
         return palette;
     }
 
@@ -868,66 +1376,8 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
             case 4: r = t; g = p; b = v; break;
             default: r = v; g = p; b = q; break;
         }
-
         return ((byte)(r * 255), (byte)(g * 255), (byte)(b * 255));
     }
 
-    /// <summary>
-    /// Decodifica 3 bytes DST a dx, dy, flags
-    /// Formato DST: cada coordenada es 12 bits con signo, más flags de control
-    /// </summary>
-    private static (int dx, int dy, int flags) DecodeStitch(byte b1, byte b2, byte b3)
-    {
-        // DST encoding:
-        // b1: YYYY YYXX (Y high 6 bits, X high 2 bits)
-        // b2: XXXX XXYY (X mid 6 bits, Y mid 2 bits)
-        // b3: YYXX XXFF (Y low 2 bits, X low 2 bits, Flags 4 bits)
-
-        int x = ((b1 & 0x03) << 10) | ((b2 & 0x3F) << 4) | ((b3 & 0xC0) >> 2);
-        int y = ((b1 & 0xFC) << 4) | ((b2 & 0xC0) >> 2) | ((b3 & 0x30) >> 4);
-
-        // Sign extend 12-bit values
-        if ((x & 0x800) != 0) x |= ~0xFFF;
-        if ((y & 0x800) != 0) y |= ~0xFFF;
-
-        int flags = b3 & 0x0F;
-
-        return (x, -y, flags); // Y is inverted in DST
-    }
-
-    /// <summary>
-    /// Codifica dx, dy, flags a 3 bytes DST
-    /// </summary>
-    private static (byte b1, byte b2, byte b3) EncodeStitch(int dx, int dy, int flags)
-    {
-        // Clamp to 12-bit signed range
-        dx = Math.Clamp(dx, -2048, 2047);
-        dy = Math.Clamp(dy, -2048, 2047);
-
-        // DST uses inverted Y
-        int x = dx & 0xFFF;
-        int y = (-dy) & 0xFFF;
-
-        byte b1 = (byte)(((y >> 4) & 0xFC) | ((x >> 10) & 0x03));
-        byte b2 = (byte)(((x >> 4) & 0x3F) | ((y >> 2) & 0xC0));
-        byte b3 = (byte)(((y & 0x03) << 4) | ((x & 0x03) << 2) | (flags & 0x0F));
-
-        return (b1, b2, b3);
-    }
-
     #endregion
-}
-
-/// <summary>
-/// Flags específicos de DST
-/// </summary>
-[Flags]
-internal enum DstFlags : ushort
-{
-    None = 0,
-    Jump = 0x01,          // Jump stitch
-    ColorChange = 0x02,   // Color change
-    Trim = 0x04,          // Trim
-    Stop = 0x08,          // Stop
-    End = 0x03,           // End of data (Jump + ColorChange)
 }

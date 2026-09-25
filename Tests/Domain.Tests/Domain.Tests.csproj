@@ -6,6 +6,9 @@
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <DisableImplicitFrameworkAttributes>true</DisableImplicitFrameworkAttributes>
+    <DisableImplicitAssemblyAttributes>true</DisableImplicitAssemblyAttributes>
   </PropertyGroup>
 
   <ItemGroup>

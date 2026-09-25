@@ -1,11 +1,15 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-  </PropertyGroup>
+      <TargetFramework>net8.0</TargetFramework>
+      <Nullable>enable</Nullable>
+      <ImplicitUsings>enable</ImplicitUsings>
+      <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+      <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+      <DisableImplicitFrameworkAttributes>true</DisableImplicitFrameworkAttributes>
+      <DisableImplicitAssemblyAttributes>true</DisableImplicitAssemblyAttributes>
+      <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
+    </PropertyGroup>
 
   <ItemGroup>
       <PackageReference Include="SkiaSharp" Version="3.116.1" />

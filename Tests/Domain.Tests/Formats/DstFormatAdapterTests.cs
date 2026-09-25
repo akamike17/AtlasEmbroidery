@@ -6,6 +6,7 @@ using AtlasEmbroidery.Domain.Formats;
 using AtlasEmbroidery.Domain.Stitching;
 using FluentAssertions;
 using Xunit;
+using FmtValidationSeverity = AtlasEmbroidery.Domain.Formats.ValidationSeverity;
 
 public class DstFormatAdapterTests
 {
@@ -34,8 +35,8 @@ public class DstFormatAdapterTests
         caps.SupportsJump.Should().BeTrue();
         caps.SupportsColorChange.Should().BeTrue();
         caps.SupportsStop.Should().BeTrue();
-        caps.MaxStitchLength.Should().Be(1270);
-        caps.MaxJumpLength.Should().Be(1270);
+        caps.MaxStitchLength.Should().Be(12700); // 12.7mm in microns
+        caps.MaxJumpLength.Should().Be(12700); // 12.7mm in microns
         caps.MaxColors.Should().Be(250);
     }
 

@@ -8,6 +8,7 @@ using System.Text;
 
 /// <summary>
 /// DST Golden Test Files - Embedded valid DST files for round-trip testing
+/// Updated for correct Tajima DST specification
 /// </summary>
 public static class DstGoldenFiles
 {
@@ -16,8 +17,8 @@ public static class DstGoldenFiles
     /// </summary>
     public static byte[] SimpleLine => BuildValidDst(
         name: "Simple Line",
-        stitches: new[] { (0, 0, (byte)0), (100, 0, (byte)0), (200, 0, (byte)0) },
-        colorCount: 1
+        stitches: new[] { (0, 0, DstControl.Normal), (1, 0, DstControl.Normal), (2, 0, DstControl.Normal) },
+        colorChanges: 0
     );
 
     /// <summary>
@@ -27,50 +28,48 @@ public static class DstGoldenFiles
         name: "Square",
         stitches: new[]
         {
-            (0, 0, (byte)0), (1000, 0, (byte)0),
-            (1000, 1000, (byte)0), (0, 1000, (byte)0),
-            (0, 0, (byte)0)
+            (0, 0, DstControl.Normal), (10, 0, DstControl.Normal),
+            (0, 10, DstControl.Normal), (-10, 0, DstControl.Normal),
+            (0, -10, DstControl.Normal)
         },
-        colorCount: 1
+        colorChanges: 0
     );
 
     /// <summary>
-    /// Multi-color design: red square + blue circle
+    /// Multi-color design: two squares with color change
     /// </summary>
     public static byte[] MultiColor => BuildValidDst(
         name: "Multi Color",
         stitches: new[]
         {
             // Color 0: Square
-            (0, 0, (byte)0), (1000, 0, (byte)0),
-            (1000, 1000, (byte)0), (0, 1000, (byte)0),
-            (0, 0, (byte)0),
+            (0, 0, DstControl.Normal), (10, 0, DstControl.Normal),
+            (0, 10, DstControl.Normal), (-10, 0, DstControl.Normal),
+            (0, -10, DstControl.Normal),
             // Color change
-            (2000, 2000, (byte)DstFlags.ColorChange),
-            // Color 1: Circle (approximated)
-            (2000, 2000, (byte)0), (2100, 2000, (byte)0),
-            (2100, 2100, (byte)0), (2000, 2100, (byte)0),
-            (2000, 2000, (byte)0)
+            (20, 20, DstControl.ColorChange),
+            // Color 1: Square
+            (0, 0, DstControl.Normal), (10, 0, DstControl.Normal),
+            (0, 10, DstControl.Normal), (-10, 0, DstControl.Normal),
+            (0, -10, DstControl.Normal)
         },
-        colorCount: 2
+        colorChanges: 1
     );
 
     /// <summary>
-    /// Design with jumps and trims
+    /// Design with jumps
     /// </summary>
     public static byte[] WithJumpsAndTrims => BuildValidDst(
         name: "Jumps and Trims",
         stitches: new[]
         {
             // First object
-            (0, 0, (byte)0), (500, 0, (byte)0), (500, 500, (byte)0), (0, 500, (byte)0), (0, 0, (byte)0),
+            (0, 0, DstControl.Normal), (5, 0, DstControl.Normal), (0, 5, DstControl.Normal), (-5, 0, DstControl.Normal), (0, -5, DstControl.Normal),
             // Jump to second object
-            (2000, 2000, (byte)(DstFlags.Jump | DstFlags.Trim)),
-            (2000, 2000, (byte)0), (2500, 2000, (byte)0), (2500, 2500, (byte)0), (2000, 2500, (byte)0), (2000, 2000, (byte)0),
-            // Trim at end
-            (0, 0, (byte)(DstFlags.Trim | DstFlags.Stop))
+            (20, 20, DstControl.Jump),
+            (0, 0, DstControl.Normal), (5, 0, DstControl.Normal), (0, 5, DstControl.Normal), (-5, 0, DstControl.Normal), (0, -5, DstControl.Normal),
         },
-        colorCount: 1
+        colorChanges: 0
     );
 
     /// <summary>
@@ -78,8 +77,8 @@ public static class DstGoldenFiles
     /// </summary>
     public static byte[] LargeDesign => BuildValidDst(
         name: "Large Design",
-        stitches: GenerateSpiral(centerX: 50000, centerY: 50000, radius: 40000, turns: 5, pointsPerTurn: 100),
-        colorCount: 1
+        stitches: GenerateSpiral(centerX: 500, centerY: 500, radius: 400, turns: 3, pointsPerTurn: 50),
+        colorChanges: 0
     );
 
     /// <summary>
@@ -88,7 +87,7 @@ public static class DstGoldenFiles
     public static byte[] ManyColors => BuildValidDst(
         name: "Many Colors",
         stitches: GenerateColorBands(),
-        colorCount: 10
+        colorChanges: 9
     );
 
     /// <summary>
@@ -96,8 +95,8 @@ public static class DstGoldenFiles
     /// </summary>
     public static byte[] SatinColumn => BuildValidDst(
         name: "Satin Column",
-        stitches: GenerateSatinColumn(x: 10000, y: 10000, width: 200, height: 5000, spacing: 50),
-        colorCount: 1
+        stitches: GenerateSatinColumn(x: 100, y: 100, width: 20, height: 500, spacing: 5),
+        colorChanges: 0
     );
 
     /// <summary>
@@ -105,8 +104,8 @@ public static class DstGoldenFiles
     /// </summary>
     public static byte[] TatamiFill => BuildValidDst(
         name: "Tatami Fill",
-        stitches: GenerateTatamiFill(x: 0, y: 0, width: 5000, height: 5000, spacing: 200),
-        colorCount: 1
+        stitches: GenerateTatamiFill(x: 0, y: 0, width: 500, height: 500, spacing: 20),
+        colorChanges: 0
     );
 
     /// <summary>
@@ -116,12 +115,12 @@ public static class DstGoldenFiles
         name: "With Stops",
         stitches: new[]
         {
-            (0, 0, (byte)0), (1000, 0, (byte)0),
-            (1000, 0, (byte)(DstFlags.Stop)),  // Stop
-            (1000, 1000, (byte)0), (0, 1000, (byte)0),
-            (0, 0, (byte)0)
+            (0, 0, DstControl.Normal), (10, 0, DstControl.Normal),
+            (0, 0, DstControl.ColorChange),
+            (0, 10, DstControl.Normal), (-10, 0, DstControl.Normal),
+            (0, 0, DstControl.Normal)
         },
-        colorCount: 1
+        colorChanges: 1
     );
 
     /// <summary>
@@ -129,21 +128,15 @@ public static class DstGoldenFiles
     /// </summary>
     public static byte[] EmptyDesign => BuildValidDst(
         name: "Empty",
-        stitches: Array.Empty<(int dx, int dy, byte flags)>(),
-        colorCount: 0
+        stitches: Array.Empty<(int dx, int dy, DstControl control)>(),
+        colorChanges: 0
     );
 
-    private static byte[] BuildValidDst(string name, (int dx, int dy, byte flags)[] stitches, int colorCount)
+    private static byte[] BuildValidDst(string name, (int dx, int dy, DstControl control)[] stitches, int colorChanges)
     {
         var ms = new MemoryStream();
         var writer = new BinaryWriter(ms, Encoding.ASCII, leaveOpen: true);
 
-        // Header (512 bytes)
-        var header = new byte[512];
-        header[0] = 0x20; // LA: magic
-        header[1] = 0x20;
-        Encoding.ASCII.GetBytes(name.PadRight(16)).CopyTo(header, 2);
-        
         // Calculate bounds
         int x = 0, y = 0;
         int minX = 0, maxX = 0, minY = 0, maxY = 0;
@@ -158,69 +151,49 @@ public static class DstGoldenFiles
             maxY = Math.Max(maxY, y);
         }
         
-        // Dimensions in 0.1mm units
-        short width = (short)((maxX - minX) / 10);
-        short height = (short)((maxY - minY) / 10);
-        if (width < 0) width = 0;
-        if (height < 0) height = 0;
-        
-        BitConverter.GetBytes(width).CopyTo(header, 90);
-        BitConverter.GetBytes(height).CopyTo(header, 92);
-        BitConverter.GetBytes(stitches.Length).CopyTo(header, 98);
-        header[102] = (byte)colorCount;
+        // Header
+        var header = new DstHeader
+        {
+            Label = name,
+            StitchCount = stitches.Length,
+            ColorChanges = colorChanges,
+            MinX = minX, MaxX = maxX,
+            MinY = minY, MaxY = maxY,
+            StartX = 0, StartY = 0,
+            EndX = x, EndY = y
+        }.ToBytes();
         
         writer.Write(header);
 
         // Stitch data
-        int lastX = 0, lastY = 0;
-        
-        foreach (var (dx, dy, flags) in stitches)
+        foreach (var (dx, dy, control) in stitches)
         {
-            int absX = lastX + dx;
-            int absY = lastY + dy;
-            
-            var (b1, b2, b3) = EncodeStitch(absX - lastX, absY - lastY, flags);
+            var controlByte = control switch
+            {
+                DstControl.Normal => DstSpec.StitchNormal,
+                DstControl.Jump => DstSpec.StitchJump,
+                DstControl.ColorChange => DstSpec.StitchColorChange,
+                DstControl.End => DstSpec.StitchEnd,
+                _ => DstSpec.StitchNormal
+            };
+            var (b1, b2, b3) = DstMovementEncoder.EncodeMovement(dx, dy, controlByte);
             writer.Write(b1);
             writer.Write(b2);
             writer.Write(b3);
-            
-            lastX = absX;
-            lastY = absY;
         }
 
-        // End marker
-        writer.Write((byte)0xF3);
+        // End marker (Tajima spec: 0xF3 0x00 0x00)
+        writer.Write(0xF3);
         writer.Write((byte)0x00);
         writer.Write((byte)0x00);
-
-        // Pad to 3-byte boundary
-        while (ms.Position % 3 != 0)
-        {
-            writer.Write((byte)0x00);
-        }
 
         writer.Flush();
         return ms.ToArray();
     }
 
-    private static (byte b1, byte b2, byte b3) EncodeStitch(int dx, int dy, int flags)
+    private static (int dx, int dy, DstControl control)[] GenerateSpiral(int centerX, int centerY, int radius, int turns, int pointsPerTurn)
     {
-        dx = Math.Clamp(dx, -2048, 2047);
-        dy = Math.Clamp(dy, -2048, 2047);
-        
-        int x = dx & 0xFFF;
-        int y = (-dy) & 0xFFF;
-        
-        byte b1 = (byte)(((y >> 4) & 0xFC) | ((x >> 10) & 0x03));
-        byte b2 = (byte)(((x >> 4) & 0x3F) | ((y >> 2) & 0xC0));
-        byte b3 = (byte)(((y & 0x03) << 4) | ((x & 0x03) << 2) | (flags & 0x0F));
-        
-        return (b1, b2, b3);
-    }
-
-    private static (int dx, int dy, byte flags)[] GenerateSpiral(int centerX, int centerY, int radius, int turns, int pointsPerTurn)
-    {
-        var stitches = new List<(int, int, byte)>();
+        var stitches = new List<(int, int, DstControl)>();
         int lastX = 0, lastY = 0;
         
         for (int t = 0; t < turns * pointsPerTurn; t++)
@@ -228,39 +201,43 @@ public static class DstGoldenFiles
             double angle = (t * 2 * Math.PI) / pointsPerTurn;
             double r = radius * (1.0 - (double)t / (turns * pointsPerTurn));
             
-            int x = centerX + (int)(r * Math.Cos(angle));
-            int y = centerY + (int)(r * Math.Sin(angle));
+            int targetX = centerX + (int)(r * Math.Cos(angle));
+            int targetY = centerY + (int)(r * Math.Sin(angle));
             
-            int dx = x - lastX;
-            int dy = y - lastY;
+            int dx = targetX - lastX;
+            int dy = targetY - lastY;
             
-            stitches.Add((dx, dy, 0));
-            lastX = x;
-            lastY = y;
+            // Clamp to max delta
+            dx = Math.Clamp(dx, -DstSpec.MaxDeltaPerRecord, DstSpec.MaxDeltaPerRecord);
+            dy = Math.Clamp(dy, -DstSpec.MaxDeltaPerRecord, DstSpec.MaxDeltaPerRecord);
+            
+            stitches.Add((dx, dy, DstControl.Normal));
+            lastX = targetX;
+            lastY = targetY;
         }
         
         return stitches.ToArray();
     }
 
-    private static (int dx, int dy, byte flags)[] GenerateColorBands()
+    private static (int dx, int dy, DstControl control)[] GenerateColorBands()
     {
-        var stitches = new List<(int, int, byte)>();
+        var stitches = new List<(int, int, DstControl)>();
         int lastX = 0, lastY = 0;
         
         for (int color = 0; color < 10; color++)
         {
             if (color > 0)
             {
-                stitches.Add((0, 0, (byte)DstFlags.ColorChange));
+                stitches.Add((0, 0, DstControl.ColorChange));
             }
             
             for (int i = 0; i < 50; i++)
             {
-                int x = color * 1000 + i * 10;
+                int x = color * 100 + i * 10;
                 int y = color * 100;
-                int dx = x - lastX;
-                int dy = y - lastY;
-                stitches.Add((dx, dy, 0));
+                int dx = Math.Clamp(x - lastX, -DstSpec.MaxDeltaPerRecord, DstSpec.MaxDeltaPerRecord);
+                int dy = Math.Clamp(y - lastY, -DstSpec.MaxDeltaPerRecord, DstSpec.MaxDeltaPerRecord);
+                stitches.Add((dx, dy, DstControl.Normal));
                 lastX = x;
                 lastY = y;
             }
@@ -269,9 +246,9 @@ public static class DstGoldenFiles
         return stitches.ToArray();
     }
 
-    private static (int dx, int dy, byte flags)[] GenerateSatinColumn(int x, int y, int width, int height, int spacing)
+    private static (int dx, int dy, DstControl control)[] GenerateSatinColumn(int x, int y, int width, int height, int spacing)
     {
-        var stitches = new List<(int, int, byte)>();
+        var stitches = new List<(int, int, DstControl)>();
         int lastX = 0, lastY = 0;
         int rows = height / spacing;
         
@@ -285,15 +262,20 @@ public static class DstGoldenFiles
             // Jump to start of row
             if (row == 0)
             {
-                stitches.Add((startX - lastX, yPos - lastY, 0));
+                int dx = Math.Clamp(startX - lastX, -DstSpec.MaxDeltaPerRecord, DstSpec.MaxDeltaPerRecord);
+                int dy = Math.Clamp(yPos - lastY, -DstSpec.MaxDeltaPerRecord, DstSpec.MaxDeltaPerRecord);
+                stitches.Add((dx, dy, DstControl.Normal));
             }
             else
             {
-                stitches.Add((startX - lastX, yPos - lastY, (byte)DstFlags.Jump));
+                int dx = Math.Clamp(startX - lastX, -DstSpec.MaxDeltaPerRecord, DstSpec.MaxDeltaPerRecord);
+                int dy = Math.Clamp(yPos - lastY, -DstSpec.MaxDeltaPerRecord, DstSpec.MaxDeltaPerRecord);
+                stitches.Add((dx, dy, DstControl.Jump));
             }
             
             // Stitch across
-            stitches.Add((endX - startX, 0, 0));
+            int dx2 = Math.Clamp(endX - startX, -DstSpec.MaxDeltaPerRecord, DstSpec.MaxDeltaPerRecord);
+            stitches.Add((dx2, 0, DstControl.Normal));
             
             lastX = endX;
             lastY = yPos;
@@ -302,9 +284,9 @@ public static class DstGoldenFiles
         return stitches.ToArray();
     }
 
-    private static (int dx, int dy, byte flags)[] GenerateTatamiFill(int x, int y, int width, int height, int spacing)
+    private static (int dx, int dy, DstControl control)[] GenerateTatamiFill(int x, int y, int width, int height, int spacing)
     {
-        var stitches = new List<(int, int, byte)>();
+        var stitches = new List<(int, int, DstControl)>();
         int lastX = 0, lastY = 0;
         int rows = height / spacing;
         
@@ -317,14 +299,19 @@ public static class DstGoldenFiles
             
             if (row == 0)
             {
-                stitches.Add((startX - lastX, yPos - lastY, 0));
+                int dx = Math.Clamp(startX - lastX, -DstSpec.MaxDeltaPerRecord, DstSpec.MaxDeltaPerRecord);
+                int dy = Math.Clamp(yPos - lastY, -DstSpec.MaxDeltaPerRecord, DstSpec.MaxDeltaPerRecord);
+                stitches.Add((dx, dy, DstControl.Normal));
             }
             else
             {
-                stitches.Add((startX - lastX, yPos - lastY, (byte)DstFlags.Jump));
+                int dx = Math.Clamp(startX - lastX, -DstSpec.MaxDeltaPerRecord, DstSpec.MaxDeltaPerRecord);
+                int dy = Math.Clamp(yPos - lastY, -DstSpec.MaxDeltaPerRecord, DstSpec.MaxDeltaPerRecord);
+                stitches.Add((dx, dy, DstControl.Jump));
             }
             
-            stitches.Add((endX - startX, 0, 0));
+            int dx2 = Math.Clamp(endX - startX, -DstSpec.MaxDeltaPerRecord, DstSpec.MaxDeltaPerRecord);
+            stitches.Add((dx2, 0, DstControl.Normal));
             
             lastX = endX;
             lastY = yPos;
