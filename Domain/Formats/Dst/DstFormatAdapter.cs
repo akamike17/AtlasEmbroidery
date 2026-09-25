@@ -64,9 +64,13 @@ public static class DstMovementEncoder
         //
         // Note: Y axis is NEGATED per Tajima spec (y = -y before encoding)
         // Control byte mapping per spec:
-        // Normal=0x00 (bits 7,6=00), Jump=0x80 (bit 7=1), ColorChange/Stop=0xC0 (bits 7,6=11), End=0xF0 (bits 7,6,5,4=1111)
-        // But End marker is SPECIAL: fixed 3-byte sequence 0xF3 0x00 0x00 (not encoded via normal path)
+        // Normal=0x00 (bits 7,6=00), Jump=0x80 (bit 7=1), ColorChange/Stop=0xC0 (bits 7,6=11)
+        // END marker is SPECIAL: fixed 3-byte sequence 0xF3 0x00 0x00 (NOT encoded via this method)
         // ColorChange/Stop records have dx=0, dy=0 with byte3=0xC3
+
+        // Reject StitchEnd (0xF0) in generic encoder - END must use EncodeEnd()
+        if ((controlByte & 0xF0) == 0xF0)
+            throw new ArgumentException("StitchEnd (0xF0) cannot be encoded via EncodeMovement. Use EncodeEnd() for the fixed 0xF3 0x00 0x00 marker.", nameof(controlByte));
 
         // Negate Y per Tajima spec
         deltaY = -deltaY;
@@ -97,6 +101,15 @@ public static class DstMovementEncoder
         byte b3 = (byte)(bits24 & 0xFF);
         
         return (b1, b2, b3);
+    }
+
+    /// <summary>
+    /// Returns the fixed Tajima DST END marker: 0xF3 0x00 0x00
+    /// This is a special 3-byte sequence NOT produced by the normal encoding path.
+    /// </summary>
+    public static (byte b1, byte b2, byte b3) EncodeEnd()
+    {
+        return (0xF3, 0x00, 0x00);
     }
     
     private static void EncodeAxisBits(int delta, bool isX, ref int bits24)
