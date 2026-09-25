@@ -17,11 +17,12 @@ public static class DstSpec
     public const int MaxDeltaPerRecord = 121; // DST units (12.1mm) - balanced ternary max: 1+3+9+27+81=121
     public const int MicronsPerDstUnit = 100; // 1 DST unit = 0.1mm = 100 microns
     
-    // Control byte values (bits 7-6 of byte 3) - raw values before shifting
-    public const byte StitchNormal = 0x00;     // 00xxxxxx (0 << 6)
-    public const byte StitchJump = 0x40;       // 01xxxxxx (1 << 6)
-    public const byte StitchColorChange = 0x80; // 10xxxxxx (2 << 6)
-    public const byte StitchEnd = 0xC0;        // 11xxxxxx (3 << 6)
+    // Control byte values (bits 7-6 of byte 3) - raw values per Tajima spec
+    // Per spec: bit 7 = Jump, bit 6 = Stop/ColorChange
+    public const byte StitchNormal = 0x00;      // 00xxxxxx (bits 7,6 = 00)
+    public const byte StitchJump = 0x80;        // 10xxxxxx (bit 7 = Jump = 1)
+    public const byte StitchColorChange = 0xC0; // 11xxxxxx (bits 7,6 = Stop/ColorChange = 11)
+    public const byte StitchEnd = 0xF0;         // 1111xxxx (End marker uses fixed 0xF3 0x00 0x00, not this)
     
     // End marker: 3 bytes (0xF3 0x00 0x00)
     public static readonly byte[] EndMarker = { 0xF3, 0x00, 0x00 };
@@ -59,14 +60,17 @@ public static class DstMovementEncoder
         // Tajima DST bit encoding (big-endian 24-bit):
         // Byte 1 (bits 23-16): Y+=1(23), Y-=1(22), Y+=9(21), Y-=9(20), X-=9(19), X+=9(18), X-=1(17), X+=1(16)
         // Byte 2 (bits 15-8): Y+=3(15), Y-=3(14), Y+=27(13), Y-=27(12), X-=27(11), X+=27(10), X-=3(9), X+=3(8)
-        // Byte 3 (bits 7-0): Jump(7), Stop(6), Y+=81(5), Y-=81(4), X-=81(3), X+=81(2), sync(1), sync(0)
-        
-        // Note: controlByte values are: Normal=0x00, Jump=0x40, ColorChange=0x80, End=0xC0
-        // These map to bits 7-6 of byte 3: 00, 01, 10, 11
-        // But per spec: bit 7 = Jump, bit 6 = Stop/ColorChange
-        // So: Normal=0x00, Jump=0x80, ColorChange/Stop=0x40, End=0xC0 would be more accurate
-        // However, we maintain compatibility with existing constants
-        
+        // Byte 3 (bits 7-0): Jump(7), Stop/ColorChange(6), Y+=81(5), Y-=81(4), X-=81(3), X+=81(2), sync(1), sync(0)
+        //
+        // Note: Y axis is NEGATED per Tajima spec (y = -y before encoding)
+        // Control byte mapping per spec:
+        // Normal=0x00 (bits 7,6=00), Jump=0x80 (bit 7=1), ColorChange/Stop=0xC0 (bits 7,6=11), End=0xF0 (bits 7,6,5,4=1111)
+        // But End marker is SPECIAL: fixed 3-byte sequence 0xF3 0x00 0x00 (not encoded via normal path)
+        // ColorChange/Stop records have dx=0, dy=0 with byte3=0xC3
+
+        // Negate Y per Tajima spec
+        deltaY = -deltaY;
+
         int bits24 = 0;
         
         // Encode X axis
@@ -75,13 +79,13 @@ public static class DstMovementEncoder
         EncodeAxisBits(deltaY, false, ref bits24);
         
         // Set control bits (bits 7-6 of byte 3, which are bits 7-6 of the 24-bit value)
-        // Map existing control values to spec bits:
+        // Map control values to spec bits:
         // StitchNormal (0x00) -> 00 in bits 7-6
-        // StitchJump (0x40) -> 01 in bits 7-6 -> bit 7 = Jump
-        // StitchColorChange (0x80) -> 10 in bits 7-6 -> bit 6 = Stop/ColorChange
-        // StitchEnd (0xC0) -> 11 in bits 7-6 -> both bits set
-        
-        // Control byte constants already have bits 7-6 set, so OR directly (no shift)
+        // StitchJump (0x80) -> 10 in bits 7-6 -> bit 7 = Jump (per spec)
+        // StitchColorChange (0xC0) -> 11 in bits 7-6 -> bits 7,6 = Stop/ColorChange (per spec)
+        // StitchEnd not used here - END is written as raw 0xF3 0x00 0x00
+
+        // Control byte constants already have bits 7-6 set correctly per spec, so OR directly
         bits24 |= (controlByte & 0xC0);
         
         // Set sync bits (bits 0-1 of byte 3)
@@ -155,17 +159,20 @@ public static class DstMovementEncoder
             (1, true, true) => 16,   // X += 1
             (1, false, true) => 17,  // X -= 1
             
-            // Y axis bits
-            (81, true, false) => 5,  // Y += 81
-            (81, false, false) => 4, // Y -= 81
-            (27, true, false) => 13, // Y += 27
-            (27, false, false) => 12,// Y -= 27
-            (9, true, false) => 21,  // Y += 9
-            (9, false, false) => 20, // Y -= 9
-            (3, true, false) => 15,  // Y += 3
-            (3, false, false) => 14, // Y -= 3
-            (1, true, false) => 23,  // Y += 1
-            (1, false, false) => 22, // Y -= 1
+            // Y axis bits (per pyembroidery/Tajima spec)
+            // Encoder NEGATES Y first, then balanced ternary
+            // positive=true  -> Y += magnitude in encoding
+            // positive=false -> Y -= magnitude in encoding
+            (81, true, false) => 5,  // Y += 81 (byte 3 bit 5)
+            (81, false, false) => 4, // Y -= 81 (byte 3 bit 4)
+            (27, true, false) => 13, // Y += 27 (byte 2 bit 5)
+            (27, false, false) => 12,// Y -= 27 (byte 2 bit 4)
+            (9, true, false) => 21,  // Y += 9 (byte 1 bit 5)
+            (9, false, false) => 20, // Y -= 9 (byte 1 bit 4)
+            (3, true, false) => 15,  // Y += 3 (byte 2 bit 7)
+            (3, false, false) => 14, // Y -= 3 (byte 2 bit 6)
+            (1, true, false) => 23,  // Y += 1 (byte 1 bit 7)
+            (1, false, false) => 22, // Y -= 1 (byte 1 bit 6)
             
             _ => throw new ArgumentException($"Invalid bit specification: mag={magnitude}, pos={positive}, isX={isX}")
         };
@@ -223,17 +230,23 @@ public static class DstMovementEncoder
         }
         else
         {
-            // Y axis bits
-            if ((bits24 & (1 << 5)) != 0) result += 81;   // Y += 81
-            if ((bits24 & (1 << 4)) != 0) result -= 81;   // Y -= 81
-            if ((bits24 & (1 << 13)) != 0) result += 27;  // Y += 27
-            if ((bits24 & (1 << 12)) != 0) result -= 27;  // Y -= 27
-            if ((bits24 & (1 << 21)) != 0) result += 9;   // Y += 9
-            if ((bits24 & (1 << 20)) != 0) result -= 9;   // Y -= 9
-            if ((bits24 & (1 << 15)) != 0) result += 3;   // Y += 3
-            if ((bits24 & (1 << 14)) != 0) result -= 3;   // Y -= 3
-            if ((bits24 & (1 << 23)) != 0) result += 1;   // Y += 1
-            if ((bits24 & (1 << 22)) != 0) result -= 1;   // Y -= 1
+            // Y axis bits (per pyembroidery/Tajima spec)
+            // Encoder: Y is NEGATED first, then encoded
+            // Decoder: decode Y from bits, then NEGATE
+            int yEncoded = 0;
+            if ((bits24 & (1 << 5)) != 0) yEncoded += 81;   // bit 5 -> Y += 81 in encoding
+            if ((bits24 & (1 << 4)) != 0) yEncoded -= 81;   // bit 4 -> Y -= 81 in encoding
+            if ((bits24 & (1 << 13)) != 0) yEncoded += 27;  // bit 13 -> Y += 27 in encoding
+            if ((bits24 & (1 << 12)) != 0) yEncoded -= 27;  // bit 12 -> Y -= 27 in encoding
+            if ((bits24 & (1 << 21)) != 0) yEncoded += 9;   // bit 21 -> Y += 9 in encoding
+            if ((bits24 & (1 << 20)) != 0) yEncoded -= 9;   // bit 20 -> Y -= 9 in encoding
+            if ((bits24 & (1 << 15)) != 0) yEncoded += 3;   // bit 15 -> Y += 3 in encoding
+            if ((bits24 & (1 << 14)) != 0) yEncoded -= 3;   // bit 14 -> Y -= 3 in encoding
+            if ((bits24 & (1 << 23)) != 0) yEncoded += 1;   // bit 23 -> Y += 1 in encoding
+            if ((bits24 & (1 << 22)) != 0) yEncoded -= 1;   // bit 22 -> Y -= 1 in encoding
+            
+            // Negate per Tajima spec (encoder negated Y before encoding)
+            result = -yEncoded;
         }
         
         return result;
@@ -368,10 +381,10 @@ public sealed class DstStitchRecord
 public enum DstControl : byte
 {
     None = 0,
-    Normal = 0,      // Bits 7-6 = 00
-    Jump = 1,        // Bits 7-6 = 01
-    ColorChange = 2, // Bits 7-6 = 10
-    End = 3          // Bits 7-6 = 11
+    Normal = 0x00,      // Bits 7-6 = 00
+    Jump = 0x80,        // Bits 7-6 = 10 (bit 7 = Jump)
+    ColorChange = 0xC0, // Bits 7-6 = 11 (bits 7,6 = Stop/ColorChange)
+    End = 0xF0          // End marker (fixed 0xF3 0x00 0x00)
 }
 
 /// <summary>

@@ -60,19 +60,20 @@ public class DstProtocolConformanceTests
     {
         // Test normal stitch (control bits 00 in bits 7-6)
         var (_, _, b3Normal) = DstMovementEncoder.EncodeMovement(1, 0, DstSpec.StitchNormal);
-        (b3Normal & 0xC0).Should().Be(DstSpec.StitchNormal, "Normal stitch should have control bits 00");
+        (b3Normal & 0xC0).Should().Be(0x00, "Normal stitch should have control bits 00");
 
-        // Test jump (control bits 01 in bits 7-6)
+        // Test jump (control bits 10 in bits 7-6) - bit 7 = Jump per spec
         var (_, _, b3Jump) = DstMovementEncoder.EncodeMovement(1, 0, DstSpec.StitchJump);
-        (b3Jump & 0xC0).Should().Be(DstSpec.StitchJump, "Jump should have control bits 01");
+        (b3Jump & 0xC0).Should().Be(0x80, "Jump should have control bits 10 (bit 7 = Jump)");
 
-        // Test color change (control bits 10 in bits 7-6)
+        // Test color change (control bits 11 in bits 7-6) - bits 7,6 = Stop/ColorChange per spec
         var (_, _, b3Color) = DstMovementEncoder.EncodeMovement(1, 0, DstSpec.StitchColorChange);
-        (b3Color & 0xC0).Should().Be(DstSpec.StitchColorChange, "Color change should have control bits 10");
+        (b3Color & 0xC0).Should().Be(0xC0, "Color change should have control bits 11 (bits 7,6 = Stop/ColorChange)");
 
-        // Test end (control bits 11 in bits 7-6)
+        // Test end - special case, uses fixed 0xF3 0x00 0x00 not encoded via EncodeMovement
+        // EncodeMovement(0,0,StitchEnd) produces byte3 with bits 7,6 = 11 (0xC0) plus sync bits
         var (_, _, b3End) = DstMovementEncoder.EncodeMovement(0, 0, DstSpec.StitchEnd);
-        (b3End & 0xC0).Should().Be(DstSpec.StitchEnd, "End should have control bits 11");
+        (b3End & 0xC0).Should().Be(0xC0, "End control byte has bits 7,6 = 11 (but END marker is special 0xF3 0x00 0x00)");
     }
 
     #endregion
@@ -123,21 +124,25 @@ public class DstProtocolConformanceTests
     public void CommandBytes_IndependentVerification()
     {
         // Verify control bit encoding matches Tajima spec
+        // Normal = 00 in bits 7-6
         var (_, _, b3n) = DstMovementEncoder.EncodeMovement(0, 0, DstSpec.StitchNormal);
         (b3n >> 6).Should().Be(0, "Normal = 00 in bits 7-6");
 
+        // Jump = 10 in bits 7-6 (bit 7 = Jump)
         var (_, _, b3j) = DstMovementEncoder.EncodeMovement(0, 0, DstSpec.StitchJump);
-        (b3j >> 6).Should().Be(1, "Jump = 01 in bits 7-6");
+        (b3j >> 6).Should().Be(2, "Jump = 10 in bits 7-6 (bit 7 = Jump)");
 
+        // ColorChange = 11 in bits 7-6 (bits 7,6 = Stop/ColorChange)
         var (_, _, b3c) = DstMovementEncoder.EncodeMovement(0, 0, DstSpec.StitchColorChange);
-        (b3c >> 6).Should().Be(2, "ColorChange = 10 in bits 7-6");
+        (b3c >> 6).Should().Be(3, "ColorChange = 11 in bits 7-6 (bits 7,6 = Stop/ColorChange)");
 
+        // End = 11 in bits 7-6 (but END marker is special 0xF3 0x00 0x00)
         var (_, _, b3e) = DstMovementEncoder.EncodeMovement(0, 0, DstSpec.StitchEnd);
-        (b3e >> 6).Should().Be(3, "End = 11 in bits 7-6");
+        (b3e >> 6).Should().Be(3, "End control byte has bits 7,6 = 11 (but END marker is special 0xF3 0x00 0x00)");
 
-        // END record must be exactly 0x00 0x00 0xF3
+        // END record must be exactly 0xF3 0x00 0x00
         DstSpec.EndMarker.Should().BeEquivalentTo(new byte[] { 0xF3, 0x00, 0x00 },
-            "END record must be 0x00 0x00 0xF3 per Tajima spec");
+            "END record must be 0xF3 0x00 0x00 per Tajima spec");
     }
 
     #endregion
@@ -968,9 +973,9 @@ public class DstProtocolConformanceTests
         DstSpec.MicronsPerDstUnit.Should().Be(100);
         DstSpec.EndMarker.Should().BeEquivalentTo(new byte[] { 0xF3, 0x00, 0x00 });
         DstSpec.StitchNormal.Should().Be(0x00);
-        DstSpec.StitchJump.Should().Be(0x40);
-        DstSpec.StitchColorChange.Should().Be(0x80);
-        DstSpec.StitchEnd.Should().Be(0xC0);
+        DstSpec.StitchJump.Should().Be(0x80);      // bit 7 = Jump per spec
+        DstSpec.StitchColorChange.Should().Be(0xC0); // bits 7,6 = Stop/ColorChange per spec
+        DstSpec.StitchEnd.Should().Be(0xF0);       // End marker is special 0xF3 0x00 0x00
         DstSpec.HeaderSize.Should().Be(512);
     }
 
