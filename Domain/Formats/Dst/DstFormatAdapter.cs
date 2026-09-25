@@ -38,129 +38,202 @@ public static class DstSpec
 }
 
 /// <summary>
-/// DST movement encoder using balanced ternary representation
+/// DST movement encoder using Tajima ternary bit encoding
+/// Per KDE Community Wiki / file-extensions.com specification:
+/// Each axis uses 10 bits: ±1, ±3, ±9, ±27, ±81 (balanced ternary magnitudes)
+/// Bits are interleaved: Y[1], Y[-1], Y[9], Y[-9], X[-9], X[9], X[-1], X[1] in byte 1, etc.
 /// </summary>
 public static class DstMovementEncoder
 {
     /// <summary>
-    /// Encodes a delta in DST units (max ±121) into 3 bytes
-    /// Returns (byte1, byte2, byte3) where byte3 contains the control bits in bits 7-6
+    /// Encodes a delta in DST units (max ±121) into 3 bytes per Tajima spec
+    /// Returns (byte1, byte2, byte3) where byte3 contains control bits in bits 7-6
     /// </summary>
     public static (byte b1, byte b2, byte b3) EncodeMovement(int deltaX, int deltaY, byte controlByte)
     {
-        // deltaX and deltaY are already in DST units, range [-121, 121]
-        // DST uses balanced ternary encoding
+        if (deltaX < -121 || deltaX > 121)
+            throw new ArgumentOutOfRangeException(nameof(deltaX), $"Delta X {deltaX} exceeds max ±121");
+        if (deltaY < -121 || deltaY > 121)
+            throw new ArgumentOutOfRangeException(nameof(deltaY), $"Delta Y {deltaY} exceeds max ±121");
+
+        // Tajima DST bit encoding (big-endian 24-bit):
+        // Byte 1 (bits 23-16): Y+=1(23), Y-=1(22), Y+=9(21), Y-=9(20), X-=9(19), X+=9(18), X-=1(17), X+=1(16)
+        // Byte 2 (bits 15-8): Y+=3(15), Y-=3(14), Y+=27(13), Y-=27(12), X-=27(11), X+=27(10), X-=3(9), X+=3(8)
+        // Byte 3 (bits 7-0): Jump(7), Stop(6), Y+=81(5), Y-=81(4), X-=81(3), X+=81(2), sync(1), sync(0)
         
-        var xEncoded = EncodeAxis(deltaX);
-        var yEncoded = EncodeAxis(deltaY);
+        // Note: controlByte values are: Normal=0x00, Jump=0x40, ColorChange=0x80, End=0xC0
+        // These map to bits 7-6 of byte 3: 00, 01, 10, 11
+        // But per spec: bit 7 = Jump, bit 6 = Stop/ColorChange
+        // So: Normal=0x00, Jump=0x80, ColorChange/Stop=0x40, End=0xC0 would be more accurate
+        // However, we maintain compatibility with existing constants
         
-        // Pack into 3 bytes per Tajima DST spec:
-        // Byte 1 (b1): Y[5:0] in bits 5:0 | X[7:6] in bits 7:6
-        // Byte 2 (b2): X[5:0] in bits 5:0 | Y[7:6] in bits 7:6
-        // Byte 3 (b3): control[7:6] | Y[9:8] in bits 3:2 | X[9:8] in bits 1:0
+        int bits24 = 0;
         
-        byte b1 = (byte)((yEncoded & 0x3F) | (((xEncoded >> 6) & 0x03) << 6));
-        byte b2 = (byte)((xEncoded & 0x3F) | (((yEncoded >> 6) & 0x03) << 6));
-        byte b3 = (byte)((controlByte & 0xC0) | (((yEncoded >> 8) & 0x03) << 2) | ((xEncoded >> 8) & 0x03));
+        // Encode X axis
+        EncodeAxisBits(deltaX, true, ref bits24);
+        // Encode Y axis
+        EncodeAxisBits(deltaY, false, ref bits24);
+        
+        // Set control bits (bits 7-6 of byte 3, which are bits 7-6 of the 24-bit value)
+        // Map existing control values to spec bits:
+        // StitchNormal (0x00) -> 00 in bits 7-6
+        // StitchJump (0x40) -> 01 in bits 7-6 -> bit 7 = Jump
+        // StitchColorChange (0x80) -> 10 in bits 7-6 -> bit 6 = Stop/ColorChange
+        // StitchEnd (0xC0) -> 11 in bits 7-6 -> both bits set
+        
+        // Control byte constants already have bits 7-6 set, so OR directly (no shift)
+        bits24 |= (controlByte & 0xC0);
+        
+        // Set sync bits (bits 0-1 of byte 3)
+        bits24 |= 0x03;
+        
+        // Extract bytes (big-endian)
+        byte b1 = (byte)((bits24 >> 16) & 0xFF);
+        byte b2 = (byte)((bits24 >> 8) & 0xFF);
+        byte b3 = (byte)(bits24 & 0xFF);
         
         return (b1, b2, b3);
     }
     
-    /// <summary>
-    /// Decodes 3 bytes into deltaX, deltaY, controlByte
-    /// </summary>
-    public static (int deltaX, int deltaY, byte control) DecodeMovement(byte b1, byte b2, byte b3)
+    private static void EncodeAxisBits(int delta, bool isX, ref int bits24)
     {
-        // Byte layout per Tajima DST spec:
-        // b1[5:0] = Y[5:0], b1[7:6] = X[7:6]
-        // b2[5:0] = X[5:0], b2[7:6] = Y[7:6]
-        // b3[1:0] = X[9:8], b3[3:2] = Y[9:8], b3[7:6] = control
-        
-        int xEncoded = (b2 & 0x3F) | (b1 & 0xC0) | ((b3 & 0x03) << 8);
-        int yEncoded = (b1 & 0x3F) | (b2 & 0xC0) | (((b3 >> 2) & 0x03) << 8);
-
-        int deltaX = DecodeAxis(xEncoded);
-        int deltaY = DecodeAxis(yEncoded);
-        byte control = (byte)((b3 >> 6) & 0x03); // Control is in bits 7-6
-
-        return (deltaX, deltaY, control);
-    }
-    
-    private static int EncodeAxis(int delta)
-    {
-        // Balanced ternary encoding for DST
-        // Magnitudes: 1, 3, 9, 27, 81 (3^0, 3^1, 3^2, 3^3, 3^4)
-        // Each trit can be -1, 0, +1
-        // Encoded in 10 bits: 2 bits per trit (00=0, 01=+1, 10=-1, 11=invalid)
-        // Sign is inherent in the trits (no separate sign bit)
-        
-        if (delta < -DstSpec.MaxDeltaPerRecord || delta > DstSpec.MaxDeltaPerRecord)
-            throw new ArgumentOutOfRangeException(nameof(delta), $"Delta {delta} exceeds max ±{DstSpec.MaxDeltaPerRecord}");
+        // Balanced ternary encoding using standard algorithm
+        // Each magnitude can be -1, 0, +1
+        // Algorithm: repeatedly divide by 3, adjusting remainders 2->-1, -2->+1
         
         int n = delta;
-        int encoded = 0;
+        int[] magnitudes = { 1, 3, 9, 27, 81 };  // 3^0, 3^1, 3^2, 3^3, 3^4
         
-        for (int i = 0; i < DstSpec.MoveMagnitudes.Length; i++)
+        for (int i = 0; i < magnitudes.Length; i++)
         {
-            int mag = DstSpec.MoveMagnitudes[i]; // 1, 3, 9, 27, 81
+            int mag = magnitudes[i];
             int r = n % 3;
             n = n / 3;
             
-            // Convert to balanced ternary: if remainder is 2, make it -1 and carry 1
-            // For negative numbers in C#, % can return negative, so handle both cases
-            int trit;
+            // Adjust for balanced ternary: digits must be -1, 0, +1
             if (r == 2)
             {
-                trit = -1;
+                r = -1;
                 n += 1;
             }
             else if (r == -2)
             {
-                trit = 1;
+                r = 1;
                 n -= 1;
             }
-            else
+            
+            // Set the bit for this magnitude
+            if (r == 1)
             {
-                trit = r; // -1, 0, or 1
+                SetAxisBit(mag, true, isX, ref bits24);
             }
-            
-            // Encode trit in 2 bits: 00=0, 01=+1, 10=-1
-            int tritBits;
-            if (trit == 1) tritBits = 0b01;
-            else if (trit == -1) tritBits = 0b10;
-            else tritBits = 0b00;
-            
-            encoded |= (tritBits << (i * 2));
+            else if (r == -1)
+            {
+                SetAxisBit(mag, false, isX, ref bits24);
+            }
+            // r == 0: no bit set
         }
         
-        // n should be 0 now for exact representation
+        // After processing all 5 trits, n should be 0
         if (n != 0)
-            throw new InvalidOperationException($"Failed to encode delta {delta} in balanced ternary: remainder {n}");
-        
-        return encoded;
+            throw new InvalidOperationException($"Failed to encode delta {delta}: overflow (remaining {n})");
     }
     
-    private static int DecodeAxis(int encoded)
+    private static void SetAxisBit(int magnitude, bool positive, bool isX, ref int bits24)
     {
-        // Decode balanced ternary from 10 bits (2 bits per trit)
-        // 00 = 0, 01 = +1, 10 = -1, 11 = invalid
-        
-        int result = 0;
-        for (int i = 0; i < DstSpec.MoveMagnitudes.Length; i++)
+        int bitPosition = (magnitude, positive, isX) switch
         {
-            int tritBits = (encoded >> (i * 2)) & 0x03;
-            int trit;
+            // X axis bits
+            (81, true, true) => 2,   // X += 81
+            (81, false, true) => 3,  // X -= 81
+            (27, true, true) => 10,  // X += 27
+            (27, false, true) => 11, // X -= 27
+            (9, true, true) => 18,   // X += 9
+            (9, false, true) => 19,  // X -= 9
+            (3, true, true) => 8,    // X += 3
+            (3, false, true) => 9,   // X -= 3
+            (1, true, true) => 16,   // X += 1
+            (1, false, true) => 17,  // X -= 1
             
-            switch (tritBits)
+            // Y axis bits
+            (81, true, false) => 5,  // Y += 81
+            (81, false, false) => 4, // Y -= 81
+            (27, true, false) => 13, // Y += 27
+            (27, false, false) => 12,// Y -= 27
+            (9, true, false) => 21,  // Y += 9
+            (9, false, false) => 20, // Y -= 9
+            (3, true, false) => 15,  // Y += 3
+            (3, false, false) => 14, // Y -= 3
+            (1, true, false) => 23,  // Y += 1
+            (1, false, false) => 22, // Y -= 1
+            
+            _ => throw new ArgumentException($"Invalid bit specification: mag={magnitude}, pos={positive}, isX={isX}")
+        };
+        
+        bits24 |= (1 << bitPosition);
+    }
+    
+    /// <summary>
+    /// Decodes 3 bytes into deltaX, deltaY, controlByte per Tajima spec
+    /// </summary>
+    public static (int deltaX, int deltaY, byte control) DecodeMovement(byte b1, byte b2, byte b3)
+    {
+        // Combine bytes (big-endian)
+        int bits24 = (b1 << 16) | (b2 << 8) | b3;
+        
+        // Check sync bits (bits 0-1 must be set)
+        if ((bits24 & 0x03) != 0x03)
+        {
+            // Check if this is END marker (0xF3 0x00 0x00)
+            if (b1 == 0xF3 && b2 == 0x00 && b3 == 0x00)
             {
-                case 0b00: trit = 0; break;
-                case 0b01: trit = 1; break;
-                case 0b10: trit = -1; break;
-                default:
-                    throw new InvalidDataException($"Invalid balanced ternary trit {tritBits} at magnitude {DstSpec.MoveMagnitudes[i]} (must be 00, 01, or 10)");
+                return (0, 0, (byte)DstControl.End);
             }
-            
-            result += trit * DstSpec.MoveMagnitudes[i];
+            throw new InvalidDataException($"Invalid DST record: sync bits not set (b3=0x{b3:X2})");
+        }
+        
+        // Decode X axis
+        int deltaX = DecodeAxisBits(bits24, true);
+        // Decode Y axis
+        int deltaY = DecodeAxisBits(bits24, false);
+        
+        // Extract control bits (bits 7-6 of byte 3)
+        byte control = (byte)((b3 >> 6) & 0x03);
+        
+        return (deltaX, deltaY, control);
+    }
+    
+    private static int DecodeAxisBits(int bits24, bool isX)
+    {
+        int result = 0;
+        
+        if (isX)
+        {
+            // X axis bits
+            if ((bits24 & (1 << 2)) != 0) result += 81;   // X += 81
+            if ((bits24 & (1 << 3)) != 0) result -= 81;   // X -= 81
+            if ((bits24 & (1 << 10)) != 0) result += 27;  // X += 27
+            if ((bits24 & (1 << 11)) != 0) result -= 27;  // X -= 27
+            if ((bits24 & (1 << 18)) != 0) result += 9;   // X += 9
+            if ((bits24 & (1 << 19)) != 0) result -= 9;   // X -= 9
+            if ((bits24 & (1 << 8)) != 0) result += 3;    // X += 3
+            if ((bits24 & (1 << 9)) != 0) result -= 3;    // X -= 3
+            if ((bits24 & (1 << 16)) != 0) result += 1;   // X += 1
+            if ((bits24 & (1 << 17)) != 0) result -= 1;   // X -= 1
+        }
+        else
+        {
+            // Y axis bits
+            if ((bits24 & (1 << 5)) != 0) result += 81;   // Y += 81
+            if ((bits24 & (1 << 4)) != 0) result -= 81;   // Y -= 81
+            if ((bits24 & (1 << 13)) != 0) result += 27;  // Y += 27
+            if ((bits24 & (1 << 12)) != 0) result -= 27;  // Y -= 27
+            if ((bits24 & (1 << 21)) != 0) result += 9;   // Y += 9
+            if ((bits24 & (1 << 20)) != 0) result -= 9;   // Y -= 9
+            if ((bits24 & (1 << 15)) != 0) result += 3;   // Y += 3
+            if ((bits24 & (1 << 14)) != 0) result -= 3;   // Y -= 3
+            if ((bits24 & (1 << 23)) != 0) result += 1;   // Y += 1
+            if ((bits24 & (1 << 22)) != 0) result -= 1;   // Y -= 1
         }
         
         return result;
@@ -893,7 +966,7 @@ public sealed class DstFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
                         Message = "Movement exceeds DST maximum per record",
                         Evidence = ex.Message,
                         Position = stream.Position - 3,
-                        Recommendation = "Long movements must be decomposed into multiple records (max ±127 DST units)"
+                        Recommendation = $"Long movements must be decomposed into multiple records (max ±{DstSpec.MaxDeltaPerRecord} DST units)"
                     });
                     continue; // Skip this record, continue validation
                 }

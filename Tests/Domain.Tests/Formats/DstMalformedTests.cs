@@ -215,10 +215,10 @@ public class DstMalformedTests
     {
         // Arrange: valid header but corrupted stitch bytes (invalid balanced ternary)
         var data = DstGoldenFiles.SimpleLine;
-        // Corrupt a stitch byte in the middle (after header) - set invalid high bits
+        // Corrupt a stitch byte in the middle (after header) - clear sync bits (bits 0-1 of byte 3)
         if (data.Length > 512 + 3)
         {
-            data[512 + 1] = 0xFF; // Invalid encoding - high bits set
+            data[512 + 2] = (byte)(data[512 + 2] & 0xFC); // Clear sync bits (bits 0-1 of byte 3 = bits 0-1 of third byte)
         }
         using var stream = new MemoryStream(data);
 

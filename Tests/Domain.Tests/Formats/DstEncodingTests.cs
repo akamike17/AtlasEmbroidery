@@ -301,15 +301,33 @@ public class DstEncodingTests
     }
 
     [Fact]
-    public async Task HeaderSize_Is512Bytes()
+    public async Task HeaderSize_IsExactly512Bytes_FirstRecordAtOffset512()
     {
         var project = new AtlasProject { Name = "HeaderTest" };
-        
+
         using var ms = new MemoryStream();
         await _adapter.WriteAsync(project, ms);
         var bytes = ms.ToArray();
-        
-        // Header should be exactly 512 bytes
-        bytes.Length.Should().BeGreaterOrEqualTo(512 + 3); // header + END
+
+        // Header must be exactly 512 bytes
+        bytes.Length.Should().BeGreaterOrEqualTo(512 + 3, "File must contain header + END marker");
+
+        // Verify no END marker (0xF3 0x00 0x00) appears within the first 512 bytes
+        for (int i = 0; i <= 509; i++)
+        {
+            if (i + 2 < 512 && bytes[i] == 0xF3 && bytes[i + 1] == 0x00 && bytes[i + 2] == 0x00)
+            {
+                throw new Xunit.Sdk.XunitException($"END marker found at offset {i} within header (must be at offset 512 or later)");
+            }
+        }
+
+        // For empty design: bytes 512-514 must be END marker (0xF3 0x00 0x00)
+        bytes[512].Should().Be(0xF3, "Position 512 must be first byte of END marker for empty design");
+        bytes[513].Should().Be(0x00, "Position 513 must be second byte of END marker");
+        bytes[514].Should().Be(0x00, "Position 514 must be third byte of END marker");
+
+        // Body length (excluding header) must be multiple of 3 (3-byte records)
+        int bodyLength = bytes.Length - 512;
+        (bodyLength % 3).Should().Be(0, "Body must contain complete 3-byte records");
     }
 }
