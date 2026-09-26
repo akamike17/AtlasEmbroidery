@@ -203,19 +203,21 @@ public class PesMalformedTests
     public async Task Validate_OffsetEqualsFileLengthMinusOne_Invalid()
     {
         // offset == file length - 1 - only 1 byte remaining, need 3 for 31 FF F0
-        // File: signature(8) + offset(4) = 12 bytes. PEC offset = 13 (needs 13 bytes total, file is 12).
+        // File: signature(8) + offset(4) + 1 padding byte = 13 bytes. PEC offset = 12.
+        // So offset 12 == fileLength 13 - 1, leaving exactly 1 byte at PEC offset.
         var newStream = new MemoryStream();
         var writer = new BinaryWriter(newStream, Encoding.ASCII, leaveOpen: true);
-        writer.Write(Encoding.ASCII.GetBytes("#PES0060"));
-        writer.Write(13); // offset leaves -1 bytes (truncated)
+        writer.Write(Encoding.ASCII.GetBytes("#PES0060")); // 8 bytes
+        writer.Write(12); // 4 bytes - PEC offset = 12
+        writer.Write((byte)0x00); // 1 byte padding - file is now 13 bytes total
         writer.Flush();
         newStream.Position = 0;
 
         var result = await _adapter.ValidateAsync(newStream);
 
         result.IsValid.Should().BeFalse();
-        // Offset 13 is > file length 12, so PEC_OFFSET_BEYOND_FILE
-        result.Issues.Should().Contain(i => i.RuleId == "PES.PEC_OFFSET_BEYOND_FILE");
+        // Offset 12 is valid (>=12) but only 1 byte remains (need 3 for 31 FF F0), so PEC_OFFSET_TRUNCATED
+        result.Issues.Should().Contain(i => i.RuleId == "PES.PEC_OFFSET_TRUNCATED");
     }
 
     [Fact]
