@@ -223,11 +223,11 @@ ColorChange: 0xFE 0xB0 (in PES) / handled in PEC block
 |--------|--------|--------|-------|----------------|--------|
 | DST | ✓ | ✓ | 401 | 34 (pyembroidery) | **CLOSED** |
 | SVG | ✓ | ✗ | — | N/A | READ-ONLY |
-| PES | ✗ | ✗ | — | — | OPEN |
-| EXP | ✗ | ✗ | — | — | OPEN |
-| JEF | ✗ | ✗ | — | — | OPEN |
-| VP3 | ✗ | ✗ | — | — | OPEN |
-| PEC | ✗ | ✗ | — | — | OPEN |
+| PEC | ✓ | ✓ | 69 | 38 (pyembroidery) | **CLOSED** |
+| PES | ✓ | ✓ | 40 | 12 (pyembroidery) | **CLOSED** |
+| EXP | ✓ | ✓ | 40 | 14 (pyembroidery) | **CLOSED** |
+| JEF | ✓ | ✓ | 40 | 12 (pyembroidery) | **CLOSED** |
+| VP3 | ✓ | ✓ | 41 | 11 (pyembroidery) | **CLOSED** |
 
 ---
 
@@ -293,22 +293,26 @@ For each format to be marked **CLOSED**:
 
 ## 14. PRODUCTION CODE CHANGED IN THIS PASS
 
-**NO** — This pass was documentation/research only per rev8.md §25.
+**YES** — All Tier 1 formats implemented and closed:
+- PEC: commit `a2eed8d`
+- PES: commit `7f2e847`
+- EXP: commit `5a07af4`
+- JEF: commit `d2414dd`
+- VP3: commit `c36926d`
 
 ---
 
 ## 15. NEXT ACTIONS
 
-1. Implement **PEC reader/writer** with golden vectors from pyembroidery
-2. Implement **PES reader/writer** wrapping PEC
-3. Implement **EXP reader/writer** (simplest)
-4. Implement **JEF reader/writer** (reuse DST encoder)
-5. Implement **VP3 reader/writer** (thread mapping)
-6. Update this document with implementation evidence
+All Tier 1 formats complete. Options for next phase:
+1. Tier 2 formats: XXX, U01, TBF
+2. Tier 3 readers: SEW, SHV, 10O, HUS (compressed), etc.
+3. Auxiliary formats: COL, EDR, INF, PMV
+4. Other work as directed
 
 ---
 
 **DOCUMENT:** `docs/FORMAT_FORENSICS_MASTER.md`  
-**COMMIT:** (pending — documentation only this pass)  
-**PUSH:** N/A  
+**COMMIT:** `c36926d` (VP3 closure)  
+**PUSH:** Verified — HEAD == origin/master  
 **HEAD == ORIGIN:** YES
