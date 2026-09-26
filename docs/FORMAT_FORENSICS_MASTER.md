@@ -157,20 +157,77 @@ ColorChange: 0xFE 0xB0 (in PES) / handled in PEC block
 **Golden Vectors:** Generate via pyembroidery  
 **Writer Feasibility:** HIGH — required for PES writer
 
+### 4.6 XXX (Singer)
+
+**Header:** Two variants (A and B), ~0x100 bytes with stitch count, thread count, bounds, metadata  
+**Stitch Encoding:** Signed 8-bit normal (2 bytes), 0x7D prefix for long moves (4 bytes with 16-bit deltas), 0x7F control prefix  
+```
+Normal:  [dx][dy]           (signed 8-bit, dy negated)
+Long:    0x7D [dx_lo][dx_hi] [dy_lo][dy_hi]  (16-bit LE)
+Jump:    0x7F 0x01 [dx][dy]  (signed 8-bit)
+Trim:    0x7F 0x03 [dx][dy]  (signed 8-bit)
+ColorChange/Stop: 0x7F 0x08 [dx][dy] / 0x7F 0x0A-0x17 [dx][dy]
+End:     0x7F 0x7F 0x02 0x14
+```
+**Coordinate Units:** 0.1mm  
+**Max Delta:** 124 (signed 8-bit), 32767 for long moves (16-bit)  
+**Thread Data:** Color table at end (RGB + 21 entries max)  
+**Compression:** None  
+**Independent Reference:** pyembroidery `XxxReader` / `XxxWriter`  
+**Golden Vectors:** Direct generation  
+**Writer Feasibility:** HIGH — straightforward signed 8/16-bit encoding
+
+### 4.7 U01 (Barudan)
+
+**Header:** 0x100 bytes (two 0x80 seeks), stitch count, bounds, last position  
+**Stitch Encoding:** 3-byte records, bit-packed control in first byte  
+```
+Byte 0: [cmd:5][sign_y:1][sign_x:1][reserved:1]
+Byte 1: |dy| (0-127)
+Byte 2: |dx| (0-127)
+Commands: Stitch=0x00, Jump=0x01, Fast=0x02, Fast+Jump=0x03, Slow=0x04, Slow+Jump=0x05, Trim=0x06/0x07, Stop=0x08, Needle=0x09-0x17, End=0x18
+```
+**Coordinate Units:** 0.1mm  
+**Max Delta:** 127 (signed 7-bit magnitude + sign bits)  
+**Thread Data:** None in stitch stream (separate CT0 file for thread chart)  
+**Compression:** None  
+**Independent Reference:** pyembroidery `U01Reader` / `U01Writer`  
+**Golden Vectors:** Direct generation  
+**Writer Feasibility:** HIGH — clean 3-byte record format, explicit speed/needle commands
+
+### 4.8 TBF (Tajima/Barudan)
+
+**Header:** 0x600 bytes text header (LA:, ST:, CO:, +X:, -X:, +Y:, -Y:, AX:, AY:, TP:, JC:, DO:, DA:) similar to DST/JEF  
+**Stitch Encoding:** 3-byte records, control in third byte  
+```
+Byte 0: dx (signed 8-bit)
+Byte 1: dy (signed 8-bit, negated)
+Byte 2: control
+Controls: Stitch=0x80, Jump=0x90, Stop=0x40, Trim=0x86, Needle=0x81, End=0x8F
+```
+**Coordinate Units:** 0.1mm  
+**Max Delta:** 127 (signed 8-bit)  
+**Thread Data:** Thread order in DO: field, thread colors in DA: field (0x45 R G B 0x20)  
+**Compression:** None  
+**Independent Reference:** pyembroidery `TbfReader` / `TbfWriter`  
+**Golden Vectors:** Direct generation  
+**Writer Feasibility:** HIGH — DST-like text header + simple 3-byte records
+
 ---
 
 ## 5. COMMAND SEMANTICS MAPPING
 
-| Atlas StitchType | DST | PEC | PES | EXP | JEF | VP3 |
-|------------------|-----|-----|-----|-----|-----|-----|
-| Running/Satin/Tatami/etc. | STITCH | STITCH | STITCH | STITCH | STITCH | STITCH |
-| Jump | Jump (0x80) | JUMP_CODE | JUMP_CODE | 0x80 0x04 | Jump (0x80) | 0x80 0x04 |
-| Trim | (Jump sequence) | TRIM_CODE | TRIM_CODE | 0x80 0x80 | (none native) | (settings) |
-| ColorChange | ColorChange (0xC0) | 0xFE 0xB0 | interpolated | 0x80 0x01 | ColorChange (0xC0) | thread mapping |
-| Stop | ColorChange (0xC0) | same | interpolated | 0x80 0x01 | ColorChange (0xC0) | color_toggled |
-| End | 0xF3 0x00 0x00 | implicit | implicit | implicit | 0xF3 0x00 0x00 | 0x10 |
+| Atlas StitchType | DST | PEC | PES | EXP | JEF | VP3 | XXX | U01 | TBF |
+|------------------|-----|-----|-----|-----|-----|-----|-----|-----|-----|
+| Running/Satin/Tatami/etc. | STITCH | STITCH | STITCH | STITCH | STITCH | STITCH | STITCH | STITCH | STITCH |
+| Jump | Jump (0x80) | JUMP_CODE | JUMP_CODE | 0x80 0x04 | Jump (0x80) | 0x80 0x04 | 0x7F 0x01 | Jump (0x01) | Jump (0x90) |
+| Trim | (Jump sequence) | TRIM_CODE | TRIM_CODE | 0x80 0x80 | (none native) | (settings) | 0x7F 0x03 | Trim (0x06/0x07) | Trim (0x86) |
+| ColorChange | ColorChange (0xC0) | 0xFE 0xB0 | interpolated | 0x80 0x01 | ColorChange (0xC0) | thread mapping | 0x7F 0x08 | Needle (0x09-0x17) | Needle (0x81) |
+| Stop | ColorChange (0xC0) | same | interpolated | 0x80 0x01 | ColorChange (0xC0) | color_toggled | 0x7F 0x08 | Stop (0x08) | Stop (0x40) |
+| Fast/Slow | (none) | (none) | (none) | (none) | (none) | (none) | (none) | Fast(0x02)/Slow(0x04) | (none) |
+| End | 0xF3 0x00 0x00 | implicit | implicit | implicit | 0xF3 0x00 0x00 | 0x10 | 0x7F 0x7F 0x02 0x14 | End (0x18) | End (0x8F) |
 
-**Critical Finding:** JEF stitch encoding is **byte-identical to DST**. VP3 uses EXP-style 2-byte records. PEC uses 12-bit variable encoding. PES wraps PEC.
+**Critical Finding:** JEF stitch encoding is **byte-identical to DST**. VP3 uses EXP-style 2-byte records. PEC uses 12-bit variable encoding. PES wraps PEC. XXX uses signed 8/16-bit with 0x7F control prefix. U01 uses 3-byte bit-packed with explicit speed/needle. TBF uses DST-like header + simple 3-byte records with control in byte 2.
 
 ---
 
@@ -184,6 +241,9 @@ ColorChange: 0xFE 0xB0 (in PES) / handled in PEC block
 | PES | 0.1mm | 2047 | Via PEC | **Negated** |
 | EXP | 0.1mm | 127 | Signed 8-bit (2 bytes) | **Negated** |
 | VP3 | 0.1mm | 127 | Signed 8-bit (2 bytes) | **Negated** |
+| XXX | 0.1mm | 124/32767 | Signed 8-bit (2B) / 16-bit LE (4B) | **Negated** |
+| U01 | 0.1mm | 127 | 3-byte bit-packed (7-bit mag + signs) | **Negated** |
+| TBF | 0.1mm | 127 | Signed 8-bit (3 bytes) | **Negated** |
 
 **All machine formats negate Y-axis** (y = -y before encoding). This is consistent across pyembroidery implementations.
 
@@ -199,6 +259,9 @@ ColorChange: 0xFE 0xB0 (in PES) / handled in PEC block
 | EXP | pyembroidery (ExpWriter) | PEmbroider | Direct |
 | JEF | pyembroidery (JefWriter) | PEmbroider | Reuse DST + JEF header |
 | VP3 | pyembroidery (Vp3Writer) | PEmbroider | Direct |
+| XXX | pyembroidery (XxxWriter) | PEmbroider | Direct |
+| U01 | pyembroidery (U01Writer) | PEmbroider | Direct |
+| TBF | pyembroidery (TbfWriter) | PEmbroider | Direct |
 
 **Note:** vpype-embroidery delegates to pyembroidery — NOT independent.  
 **PEmbroider** is the only truly independent implementation for cross-validation.
@@ -214,6 +277,9 @@ ColorChange: 0xFE 0xB0 (in PES) / handled in PEC block
 | PES → PEC | PES metadata (version-specific) lost | Document version loss |
 | VP3 → DST | Complex thread mapping, hoop info | Document thread/hoop loss |
 | DST → PES | Balanced ternary → 12-bit (precision diff) | Document coordinate quantization |
+| Any → XXX | No explicit fast/slow/needle | Document speed/needle loss |
+| Any → U01 | Separate CT0 for thread chart | Document thread separation |
+| Any → TBF | Similar to DST/JEF but different header | Document header differences |
 
 ---
 
@@ -228,6 +294,9 @@ ColorChange: 0xFE 0xB0 (in PES) / handled in PEC block
 | EXP | ✓ | ✓ | 40 | 14 (pyembroidery) | **CLOSED** |
 | JEF | ✓ | ✓ | 40 | 12 (pyembroidery) | **CLOSED** |
 | VP3 | ✓ | ✓ | 41 | 11 (pyembroidery) | **CLOSED** |
+| XXX | ✗ | ✗ | — | — | OPEN |
+| U01 | ✗ | ✗ | — | — | OPEN |
+| TBF | ✗ | ✗ | — | — | OPEN |
 
 ---
 
@@ -244,10 +313,16 @@ ColorChange: 0xFE 0xB0 (in PES) / handled in PEC block
    ↓
 5. VP3          (complex thread mapping, JEF-style records)
    ↓
-6. XXX / U01 / TBF  (Tier 2, as evidence permits)
+6. XXX          (Tier 2, signed 8/16-bit, 0x7F control prefix)
+   ↓
+7. U01          (Tier 2, 3-byte bit-packed, explicit speed/needle)
+   ↓
+8. TBF          (Tier 2, DST-like header + 3-byte records)
+   ↓
+9. HUS          (Tier 2, compressed — separate investigation)
 ```
 
-**Rationale:** PEC is the foundation for PES (which delegates to PEC). EXP is simplest for establishing test patterns. JEF reuses the already-verified DST balanced ternary encoder. VP3 is most complex due to thread mapping.
+**Rationale:** PEC is the foundation for PES (which delegates to PEC). EXP is simplest for establishing test patterns. JEF reuses the already-verified DST balanced ternary encoder. VP3 is most complex due to thread mapping. Tier 2: XXX has straightforward encoding, U01 has clean 3-byte records with speed/needle, TBF reuses DST/JEF header knowledge. HUS compression deferred.
 
 ---
 
@@ -313,6 +388,6 @@ All Tier 1 formats complete. Options for next phase:
 ---
 
 **DOCUMENT:** `docs/FORMAT_FORENSICS_MASTER.md`  
-**COMMIT:** `c36926d` (VP3 closure)  
+**COMMIT:** `904dc31` (Tier 1 closure documentation)  
 **PUSH:** Verified — HEAD == origin/master  
 **HEAD == ORIGIN:** YES
