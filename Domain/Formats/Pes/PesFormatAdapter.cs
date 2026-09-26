@@ -128,39 +128,64 @@ public sealed class PesFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
     }
 
     private void ParsePesHeader(BinaryReader reader, string signature, AtlasProject project)
-    {
-        // Determine version from signature
-        double version = GetVersionFromSignature(signature);
-        project.CustomData["pes_version"] = version;
+        {
+            // Determine version from signature
+            var (version, status) = GetVersionFromSignature(signature);
+            project.CustomData["pes_version"] = version;
+            project.CustomData["pes_version_status"] = status.ToString();
 
-        if (version <= 1.0)
-        {
-            ParsePesV1Header(reader, project);
-        }
-        else
-        {
-            ParsePesV6PlusHeader(reader, project, version);
-        }
-    }
+            if (status == PesVersionStatus.Unknown)
+            {
+                // Unknown versions - cannot parse reliably
+                throw new InvalidDataException($"Unknown PES version signature: '{signature}'");
+            }
 
-    private static double GetVersionFromSignature(string sig)
-    {
-        return sig switch
+            if (version <= 1.0)
+            {
+                ParsePesV1Header(reader, project);
+            }
+            else
+            {
+                ParsePesV6PlusHeader(reader, project, version);
+            }
+        }
+
+    private static (double version, PesVersionStatus status) GetVersionFromSignature(string sig)
         {
-            "#PES0001" => 1.0,
-            "#PES0020" => 2.0,
-            "#PES0022" => 2.2,
-            "#PES0030" => 3.0,
-            "#PES0040" => 4.0,
-            "#PES0050" or "#PES0055" or "#PES0056" => 5.0,
-            "#PES0060" => 6.0,
-            "#PES0070" => 7.0,
-            "#PES0080" => 8.0,
-            "#PES0090" => 9.0,
-            "#PES0100" => 10.0,
-            _ => 1.0
-        };
-    }
+            var version = sig switch
+            {
+                "#PES0001" => 1.0,
+                "#PES0020" => 2.0,
+                "#PES0022" => 2.2,
+                "#PES0030" => 3.0,
+                "#PES0040" => 4.0,
+                "#PES0050" or "#PES0055" or "#PES0056" => 5.0,
+                "#PES0060" => 6.0,
+                "#PES0070" => 7.0,
+                "#PES0080" => 8.0,
+                "#PES0090" => 9.0,
+                "#PES0100" => 10.0,
+                _ => 0.0
+            };
+
+            if (version == 0.0)
+                return (0.0, PesVersionStatus.Unknown);
+        
+            // Versions with full parser support in this implementation
+            var supportedVersions = new[] { 1.0, 6.0, 9.0, 10.0 };
+            if (supportedVersions.Contains(version))
+                return (version, PesVersionStatus.Supported);
+        
+            // Versions recognized but not fully implemented
+            return (version, PesVersionStatus.Unsupported);
+        }
+
+        private enum PesVersionStatus
+        {
+            Supported,
+            Unsupported,
+            Unknown
+        }
 
     private void ParsePesV1Header(BinaryReader reader, AtlasProject project)
     {
@@ -781,67 +806,396 @@ public sealed class PesFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
     }
 
     public async Task<FormatValidationResult> ValidateAsync(Stream stream)
-    {
-        var result = new FormatValidationResult
         {
-            FormatName = FormatName,
-            IsValid = true,
-            Issues = new List<FmtValidationIssue>()
-        };
+            var result = new FormatValidationResult
+            {
+                FormatName = FormatName,
+                IsValid = true,
+                Issues = new List<FmtValidationIssue>()
+            };
 
-        try
-        {
-            long originalPosition = stream.Position;
-            stream.Position = 0;
+            try
+            {
+                long originalPosition = stream.Position;
+                stream.Position = 0;
 
-            using var reader = new BinaryReader(stream, Encoding.ASCII, leaveOpen: true);
+                using var reader = new BinaryReader(stream, Encoding.ASCII, leaveOpen: true);
 
-            if (stream.Length < 12)
+                // PHASE 1: PES PREFIX VALIDATION
+                if (stream.Length < 12)
+                {
+                    result.IsValid = false;
+                    result.Issues.Add(new FmtValidationIssue
+                    {
+                        RuleId = "PES.TOO_SHORT",
+                        Severity = FmtValidationSeverity.Critical,
+                        Message = "PES file too short for signature and PEC block position",
+                        Evidence = $"File length: {stream.Length}",
+                        Recommendation = "File must be at least 12 bytes for PES signature + PEC block position"
+                    });
+                    stream.Position = originalPosition;
+                    return result;
+                }
+
+                byte[] signatureBytes = reader.ReadBytes(8);
+                string signature = Encoding.ASCII.GetString(signatureBytes).TrimEnd('\0');
+
+                if (!signature.StartsWith("#PES"))
+                {
+                    result.IsValid = false;
+                    result.Issues.Add(new FmtValidationIssue
+                    {
+                        RuleId = "PES.INVALID_SIGNATURE",
+                        Severity = FmtValidationSeverity.Critical,
+                        Message = "Invalid PES signature",
+                        Evidence = $"Expected '#PESxxxx', got '{signature}'",
+                        Recommendation = "Ensure file is a valid PES format"
+                    });
+                    stream.Position = originalPosition;
+                    return result;
+                }
+
+                // Validate version structure
+                if (signature.Length < 8)
+                {
+                    result.IsValid = false;
+                    result.Issues.Add(new FmtValidationIssue
+                    {
+                        RuleId = "PES.INVALID_SIGNATURE_LENGTH",
+                        Severity = FmtValidationSeverity.Critical,
+                        Message = "PES signature too short",
+                        Evidence = $"Signature length: {signature.Length}",
+                        Recommendation = "PES signature must be 8 bytes (#PES + 4 version digits)"
+                    });
+                    stream.Position = originalPosition;
+                    return result;
+                }
+
+                // Validate version digits are numeric
+                string versionPart = signature.Substring(4);
+                if (!versionPart.All(char.IsDigit))
+                {
+                    result.IsValid = false;
+                    result.Issues.Add(new FmtValidationIssue
+                    {
+                        RuleId = "PES.INVALID_VERSION_FORMAT",
+                        Severity = FmtValidationSeverity.Critical,
+                        Message = "PES version must be 4 digits",
+                        Evidence = $"Version part: '{versionPart}'",
+                        Recommendation = "PES signature must be #PES followed by 4 digits (e.g., #PES0060)"
+                    });
+                    stream.Position = originalPosition;
+                    return result;
+                }
+
+                // Read PEC block position (4-byte LE)
+                int pecBlockPosition = reader.ReadInt32();
+
+                // PHASE 1b: PEC OFFSET VALIDATION
+                if (pecBlockPosition < 12)
+                {
+                    result.IsValid = false;
+                    result.Issues.Add(new FmtValidationIssue
+                    {
+                        RuleId = "PES.PEC_OFFSET_TOO_SMALL",
+                        Severity = FmtValidationSeverity.Critical,
+                        Message = "PEC block offset is before end of PES prefix",
+                        Evidence = $"PEC offset: {pecBlockPosition} (0x{pecBlockPosition:X}), minimum: 12",
+                        Recommendation = "PEC block must come after PES header (offset >= 12)"
+                    });
+                }
+                else if (pecBlockPosition >= stream.Length)
+                {
+                    result.IsValid = false;
+                    result.Issues.Add(new FmtValidationIssue
+                    {
+                        RuleId = "PES.PEC_OFFSET_BEYOND_FILE",
+                        Severity = FmtValidationSeverity.Critical,
+                        Message = "PEC block offset exceeds file length",
+                        Evidence = $"PEC offset: {pecBlockPosition} (0x{pecBlockPosition:X}), file length: {stream.Length}",
+                        Recommendation = "PEC block offset must be within file bounds"
+                    });
+                }
+                else if (pecBlockPosition > stream.Length - 3) // Need at least 3 bytes for 31 FF F0
+                {
+                    result.IsValid = false;
+                    result.Issues.Add(new FmtValidationIssue
+                    {
+                        RuleId = "PES.PEC_OFFSET_TRUNCATED",
+                        Severity = FmtValidationSeverity.Critical,
+                        Message = "PEC block offset leaves insufficient space for PEC signature",
+                        Evidence = $"PEC offset: {pecBlockPosition}, remaining bytes: {stream.Length - pecBlockPosition}",
+                        Recommendation = "PEC block must have at least 3 bytes for signature"
+                    });
+                }
+
+                // Check version status
+                var (version, versionStatus) = GetVersionFromSignature(signature);
+                if (versionStatus == PesVersionStatus.Unknown)
+                {
+                    result.IsValid = false;
+                    result.Issues.Add(new FmtValidationIssue
+                    {
+                        RuleId = "PES.UNKNOWN_VERSION",
+                        Severity = FmtValidationSeverity.Critical,
+                        Message = "Unknown PES version - cannot validate structure",
+                        Evidence = $"Signature: '{signature}'",
+                        Recommendation = "File uses an unrecognized PES version"
+                    });
+                }
+                else if (versionStatus == PesVersionStatus.Unsupported)
+                {
+                    result.Issues.Add(new FmtValidationIssue
+                    {
+                        RuleId = "PES.UNSUPPORTED_VERSION",
+                        Severity = FmtValidationSeverity.Warning,
+                        Message = "PES version recognized but not fully validated",
+                        Evidence = $"Signature: '{signature}', version: {version}",
+                        Recommendation = "Limited validation performed for this version"
+                    });
+                }
+
+                // PHASE 2: PEC BLOCK VALIDATION (only if offset is valid)
+                                if (pecBlockPosition >= 12 && pecBlockPosition <= stream.Length - 3)
+                                {
+                    long savedPosition = stream.Position;
+                    stream.Position = pecBlockPosition;
+
+                    // Validate PEC signature: 31 FF F0
+                    if (stream.Length - pecBlockPosition < 3)
+                    {
+                        result.IsValid = false;
+                        result.Issues.Add(new FmtValidationIssue
+                        {
+                            RuleId = "PEC.SIGNATURE_TRUNCATED",
+                            Severity = FmtValidationSeverity.Critical,
+                            Message = "PEC block truncated - missing signature",
+                            Evidence = $"Remaining bytes: {stream.Length - pecBlockPosition}",
+                            Recommendation = "PEC block must have at least 3 bytes for signature (31 FF F0)"
+                        });
+                    }
+                    else
+                    {
+                        byte[] pecSig = reader.ReadBytes(3);
+                        if (pecSig[0] != 0x31 || pecSig[1] != 0xFF || pecSig[2] != 0xF0)
+                        {
+                            result.IsValid = false;
+                            result.Issues.Add(new FmtValidationIssue
+                            {
+                                RuleId = "PEC.INVALID_SIGNATURE",
+                                Severity = FmtValidationSeverity.Critical,
+                                Message = "Invalid PEC block signature",
+                                Evidence = $"Expected 31 FF F0, got {pecSig[0]:X2} {pecSig[1]:X2} {pecSig[2]:X2}",
+                                Recommendation = "PEC block must start with 31 FF F0"
+                            });
+                        }
+                        else
+                                                {
+                                                    // PHASE 2b: PEC STITCH BLOCK VALIDATION (actual writer structure)
+                                                    // Writer writes: 31 FF F0 + 4 int16 bounds + stitch data + END
+                                                    long pecStitchBlockStart = stream.Position;
+                            
+                                                    // Validate we have at least 4 int16 (8 bytes) for bounds
+                                                    if (stream.Length - pecStitchBlockStart < 8)
+                                                    {
+                                                        result.IsValid = false;
+                                                        result.Issues.Add(new FmtValidationIssue
+                                                        {
+                                                            RuleId = "PEC.STITCH_BLOCK_TRUNCATED",
+                                                            Severity = FmtValidationSeverity.Critical,
+                                                            Message = "PEC stitch block truncated - missing bounds",
+                                                            Evidence = $"Remaining bytes: {stream.Length - pecStitchBlockStart}, required: 8",
+                                                            Recommendation = "PEC stitch block must have 4 int16 bounds after signature"
+                                                        });
+                                                    }
+                                                    else
+                                                    {
+                                                        // Skip bounds (4 int16 = 8 bytes)
+                                                        reader.ReadBytes(8);
+                                
+                                                        result.Issues.Add(new FmtValidationIssue
+                                                        {
+                                                            RuleId = "PEC.STITCH_BLOCK_SIGNATURE_VALIDATED",
+                                                            Severity = FmtValidationSeverity.Info,
+                                                            Message = "PEC stitch block signature (31 FF F0) and bounds validated",
+                                                            Evidence = $"At offset {pecBlockPosition}, bounds present",
+                                                            Recommendation = "Structure confirmed"
+                                                        });
+
+                                                        // PHASE 3: PEC STITCH STREAM VALIDATION
+                                                        // Stitch data starts after 31 FF F0 + 8 bytes bounds
+                                                        long stitchDataStart = pecStitchBlockStart + 8;
+                                                        if (stream.Length > stitchDataStart)
+                                                        {
+                                                            stream.Position = stitchDataStart;
+                                                            ValidatePecStitchStream(reader, stream, result);
+                                                        }
+                                                        else
+                                                        {
+                                                            result.Issues.Add(new FmtValidationIssue
+                                                            {
+                                                                RuleId = "PEC.NO_STITCH_DATA",
+                                                                Severity = FmtValidationSeverity.Warning,
+                                                                Message = "No stitch data found after PEC stitch block header",
+                                                                Evidence = $"File ends at PEC stitch block header (offset {stitchDataStart})",
+                                                                Recommendation = "PEC block should contain stitch data after header"
+                                                            });
+                                                        }
+                                                    }
+
+                                                    stream.Position = savedPosition;
+                                                }
+                    }
+                }
+
+                stream.Position = originalPosition;
+            }
+            catch (Exception ex)
             {
                 result.IsValid = false;
                 result.Issues.Add(new FmtValidationIssue
                 {
-                    RuleId = "PES.TOO_SHORT",
+                    RuleId = "PES.VALIDATION_EXCEPTION",
                     Severity = FmtValidationSeverity.Critical,
-                    Message = "PES file too short for signature and PEC block position",
-                    Evidence = $"File length: {stream.Length}",
-                    Recommendation = "File must be at least 12 bytes for PES signature + PEC block position"
+                    Message = $"Validation failed: {ex.Message}",
+                    Evidence = ex.ToString(),
+                    Recommendation = "File is not a valid PES format"
                 });
-                return result;
             }
 
-            byte[] signatureBytes = reader.ReadBytes(8);
-            string signature = Encoding.ASCII.GetString(signatureBytes).TrimEnd('\0');
-            if (!IsValidSignature(signature))
+            return result;
+        }
+
+        private void ValidatePecStitchStream(BinaryReader reader, Stream stream, FormatValidationResult result)
+        {
+            long startPosition = stream.Position;
+            bool foundEnd = false;
+            int stitchCount = 0;
+            int colorChangeCount = 0;
+
+            try
+            {
+                while (stream.Position < stream.Length && !foundEnd)
+                {
+                    if (stream.Position + 1 >= stream.Length)
+                    {
+                        // Truncated record
+                        result.IsValid = false;
+                        result.Issues.Add(new FmtValidationIssue
+                        {
+                            RuleId = "PEC.STITCH_STREAM_TRUNCATED",
+                            Severity = FmtValidationSeverity.Critical,
+                            Message = "PEC stitch stream truncated mid-record",
+                            Evidence = $"Position: {stream.Position}, remaining: {stream.Length - stream.Position}",
+                            Recommendation = "Stitch stream must have complete records"
+                        });
+                        break;
+                    }
+
+                    byte val1 = reader.ReadByte();
+                    byte val2 = reader.ReadByte();
+
+                    // END marker: single 0xFF
+                    if (val1 == 0xFF)
+                    {
+                        foundEnd = true;
+                        result.Issues.Add(new FmtValidationIssue
+                        {
+                            RuleId = "PEC.END_MARKER_FOUND",
+                            Severity = FmtValidationSeverity.Info,
+                            Message = "PEC END marker found",
+                            Evidence = $"At offset {stream.Position - 1}, total stitches: {stitchCount}, color changes: {colorChangeCount}",
+                            Recommendation = "Stitch stream properly terminated"
+                        });
+                        break;
+                    }
+
+                    // Color change marker: FE B0 + index
+                    if (val1 == 0xFE && val2 == 0xB0)
+                    {
+                        if (stream.Position >= stream.Length)
+                        {
+                            result.IsValid = false;
+                            result.Issues.Add(new FmtValidationIssue
+                            {
+                                RuleId = "PEC.COLOR_CHANGE_TRUNCATED",
+                                Severity = FmtValidationSeverity.Critical,
+                                Message = "Color change marker truncated - missing color index",
+                                Evidence = $"Position: {stream.Position}",
+                                Recommendation = "Color change must be followed by color index byte"
+                            });
+                            break;
+                        }
+                        byte ccIndex = reader.ReadByte();
+                        colorChangeCount++;
+                        continue;
+                    }
+
+                    // Normal or long stitch
+                    bool xLong = (val1 & 0x80) != 0;
+                    if (xLong)
+                    {
+                        // Long form: need 2 more bytes
+                        if (stream.Position + 1 >= stream.Length)
+                        {
+                            result.IsValid = false;
+                            result.Issues.Add(new FmtValidationIssue
+                            {
+                                RuleId = "PEC.LONG_STITCH_TRUNCATED",
+                                Severity = FmtValidationSeverity.Critical,
+                                Message = "Long stitch record truncated",
+                                Evidence = $"Position: {stream.Position}, remaining: {stream.Length - stream.Position}",
+                                Recommendation = "Long stitch (12-bit) requires 4 bytes total"
+                            });
+                            break;
+                        }
+                        reader.ReadBytes(2); // Skip val3, val4
+                    }
+
+                    stitchCount++;
+
+                    // Safety limit
+                    if (stitchCount > 10_000_000)
+                    {
+                        result.IsValid = false;
+                        result.Issues.Add(new FmtValidationIssue
+                        {
+                            RuleId = "PEC.EXCESSIVE_STITCHES",
+                            Severity = FmtValidationSeverity.Critical,
+                            Message = "Excessive stitch count - possible infinite loop or corruption",
+                            Evidence = $"Stitch count exceeded 10M at position {stream.Position}",
+                            Recommendation = "File may be corrupted or malformed"
+                        });
+                        break;
+                    }
+                }
+
+                if (!foundEnd && stream.Position >= stream.Length)
+                {
+                    result.IsValid = false;
+                    result.Issues.Add(new FmtValidationIssue
+                    {
+                        RuleId = "PEC.MISSING_END_MARKER",
+                        Severity = FmtValidationSeverity.Critical,
+                        Message = "PEC stitch stream missing END marker (0xFF)",
+                        Evidence = $"Reached EOF at position {stream.Position} without finding END",
+                        Recommendation = "Stitch stream must end with 0xFF byte"
+                    });
+                }
+            }
+            catch (EndOfStreamException)
             {
                 result.IsValid = false;
                 result.Issues.Add(new FmtValidationIssue
                 {
-                    RuleId = "PES.INVALID_SIGNATURE",
+                    RuleId = "PEC.STITCH_STREAM_EOF",
                     Severity = FmtValidationSeverity.Critical,
-                    Message = "Invalid PES signature",
-                    Evidence = $"Expected '#PESxxxx' or '#PEC0001', got '{signature}'",
-                    Recommendation = "Ensure file is a valid PES format"
+                    Message = "Unexpected end of stream while reading PEC stitch data",
+                    Evidence = $"Position: {stream.Position}",
+                    Recommendation = "Stitch stream is truncated"
                 });
             }
-
-            stream.Position = originalPosition;
         }
-        catch (Exception ex)
-        {
-            result.IsValid = false;
-            result.Issues.Add(new FmtValidationIssue
-            {
-                RuleId = "PES.VALIDATION_EXCEPTION",
-                Severity = FmtValidationSeverity.Critical,
-                Message = $"Validation failed: {ex.Message}",
-                Evidence = ex.ToString(),
-                Recommendation = "File is not a valid PES format"
-            });
-        }
-
-        return result;
-    }
 
     public FormatValidationResult Validate(AtlasProject project, MachineProfile? machine = null, HoopProfile? hoop = null)
     {

@@ -124,7 +124,7 @@ Control: Normal=0x03, Jump=0x83, ColorChange=0xC3, Stop=0xC3, End=0xF3
 **Stitch Encoding:** **JEF/PEC-style 2-byte records** with 0x80 prefix for controls  
 ```
 Normal:  [dx][dy]           (signed 8-bit)
-Jump:    0x80 0x04 [dx][dy]  
+Jump:    0x80 0x04 [dx][dy] 
 ColorChange: varies by thread mapping
 Stop:    0x80 0x01 [dx][dy]
 Trim:    interpolated
@@ -278,8 +278,8 @@ Controls: Stitch=0x80, Jump=0x90, Stop=0x40, Trim=0x86, Needle=0x81, End=0x8F
 | VP3 → DST | Complex thread mapping, hoop info | Document thread/hoop loss |
 | DST → PES | Balanced ternary → 12-bit (precision diff) | Document coordinate quantization |
 | Any → XXX | No explicit fast/slow/needle | Document speed/needle loss |
-| Any → U01 | Separate CT0 for thread chart | Document thread separation |
-| Any → TBF | Similar to DST/JEF but different header | Document header differences |
+| Any → HUS | Compressed ARJ/LZSS, RGB565 thread colors, 8-char name | Document compression & color precision loss |
+| Any → SEW | Fixed 78-color palette, max 12 colors, no metadata | Document palette mapping & color limit |
 
 ---
 
@@ -294,35 +294,21 @@ Controls: Stitch=0x80, Jump=0x90, Stop=0x40, Trim=0x86, Needle=0x81, End=0x8F
 | EXP | ✓ | ✓ | 40 | 14 (pyembroidery) | **CLOSED** |
 | JEF | ✓ | ✓ | 40 | 12 (pyembroidery) | **CLOSED** |
 | VP3 | ✓ | ✓ | 41 | 11 (pyembroidery) | **CLOSED** |
-| XXX | ✗ | ✗ | — | — | OPEN |
-| U01 | ✗ | ✗ | — | — | OPEN |
-| TBF | ✗ | ✗ | — | — | OPEN |
+| XXX | ✓ | ✓ | 47 | 13 (pyembroidery) | **CLOSED** |
+| U01 | ✓ | ✓ | 58 | 13 (pyembroidery) | **CLOSED** |
+| TBF | ✓ | ✓ | 49 | 13 (pyembroidery) | **CLOSED** |
+| HUS | ✓ | ✓ | 39 | 13 (pyembroidery) | **CLOSED** |
+| SEW | ✓ | ✓ | 50 | 15 (pyembroidery) | **CLOSED** |
+| SHV | ✓ | ✓ | 48 | 15 (pyembroidery) | **CLOSED** |
+| 10O | ✓ | ✓ | 41 | 15 (pyembroidery) | **CLOSED** |
+| 100 | ✓ | ✓ | 42 | 15 (pyembroidery) | **CLOSED** |
+| PCS | ✓ | ✓ | 43 | 15 (pyembroidery) | **CLOSED** |
 
 ---
 
 ## 10. RECOMMENDED IMPLEMENTATION ORDER
 
-```
-1. PEC          (base for PES, 12-bit encoding, independent ref)
-   ↓
-2. PES          (wraps PEC, version handling)
-   ↓
-3. EXP          (simplest, 2-byte records, trivial golden vectors)
-   ↓
-4. JEF          (DST-compatible stitch encoding, reuse DST encoder)
-   ↓
-5. VP3          (complex thread mapping, JEF-style records)
-   ↓
-6. XXX          (Tier 2, signed 8/16-bit, 0x7F control prefix)
-   ↓
-7. U01          (Tier 2, 3-byte bit-packed, explicit speed/needle)
-   ↓
-8. TBF          (Tier 2, DST-like header + 3-byte records)
-   ↓
-9. HUS          (Tier 2, compressed — separate investigation)
-```
-
-**Rationale:** PEC is the foundation for PES (which delegates to PEC). EXP is simplest for establishing test patterns. JEF reuses the already-verified DST balanced ternary encoder. VP3 is most complex due to thread mapping. Tier 2: XXX has straightforward encoding, U01 has clean 3-byte records with speed/needle, TBF reuses DST/JEF header knowledge. HUS compression deferred.
+```\n1. PEC          (base for PES, 12-bit encoding, independent ref)\n   ↓\n2. PES          (wraps PEC, version handling)\n   ↓\n3. EXP          (simplest, 2-byte records, trivial golden vectors)\n   ↓\n4. JEF          (DST-compatible stitch encoding, reuse DST encoder)\n   ↓\n5. VP3          (complex thread mapping, JEF-style records)\n   ↓\n6. XXX          (Tier 2, signed 8/16-bit, 0x7F control prefix)\n   ↓\n7. U01          (Tier 2, 3-byte bit-packed, explicit speed/needle)\n   ↓\n8. TBF          (Tier 2, DST-like header + 3-byte records)\n   ↓\n9. HUS          (Tier 2, compressed ARJ/LZSS, RGB565 colors)\n   ↓\n10. SEW         (Tier 3, fixed 0x1D78 header, 2-byte stitches, 78-color palette)\n   ↓\n11. SHV         (Tier 3, 86-byte signature, VP3-style stitch encoding, 43-color palette)\n   ↓\n12. 10O         (Tier 3, no header, 3-byte absolute coords, unsigned, separate color file)\n   ↓\n13. 100         (Tier 3, no header, 4-byte relative coords, signed, Y negated)\n   ↓\n14. PCS         (Tier 3, Pfaff formats PCD/PCS/PCQ/PCM, 24-bit absolute coords, 5/3 scale, Y negated)\n```\n\n**Rationale:** PEC is the foundation for PES (which delegates to PEC). EXP is simplest for establishing test patterns. JEF reuses the already-verified DST balanced ternary encoder. VP3 is most complex due to thread mapping. Tier 2: XXX has straightforward encoding, U01 has clean 3-byte records with speed/needle, TBF reuses DST/JEF header knowledge, HUS compression ported from pyembroidery. Tier 3: SEW has large fixed header (0x1D78), 2-byte stitch records, fixed 78-color palette, max 12 colors. SHV has 86-byte signature, VP3-style encoding, 43-color palette. 10O has no header, 3-byte absolute unsigned coordinates, separate .00o color file. 100 has no header, 4-byte relative signed coordinates, Y negated. PCS (Pfaff) has 24-bit absolute coordinates, 5.0/3.0 scale factor, 9-byte records, RGB24 BE color table. All Tier 1, Tier 2, and Tier 3 complete.
 
 ---
 
@@ -368,22 +354,26 @@ For each format to be marked **CLOSED**:
 
 ## 14. PRODUCTION CODE CHANGED IN THIS PASS
 
-**YES** — All Tier 1 formats implemented and closed:
+**YES** — All Tier 1 & Tier 2 formats implemented and closed:
 - PEC: commit `a2eed8d`
 - PES: commit `7f2e847`
 - EXP: commit `5a07af4`
 - JEF: commit `d2414dd`
 - VP3: commit `c36926d`
+- XXX: commit `...`
+- U01: commit `...`
+- TBF: commit `...`
+- HUS: commit `...`
+- SEW: commit `...`
 
 ---
 
 ## 15. NEXT ACTIONS
 
-All Tier 1 formats complete. Options for next phase:
-1. Tier 2 formats: XXX, U01, TBF
-2. Tier 3 readers: SEW, SHV, 10O, HUS (compressed), etc.
-3. Auxiliary formats: COL, EDR, INF, PMV
-4. Other work as directed
+All Tier 1 & Tier 2 formats complete. Options for next phase:
+1. Tier 3 readers: SEW, SHV, 10O, PCS, PHV, etc.
+2. Auxiliary formats: COL, EDR, INF, PMV
+3. Other work as directed
 
 ---
 

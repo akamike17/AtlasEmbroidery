@@ -26,9 +26,15 @@
       </ItemGroup>
 
       <ItemGroup>
-    <Compile Remove="Tests\**" />
-    <EmbeddedResource Remove="Tests\**" />
-    <None Remove="Tests\**" />
-  </ItemGroup>
+        <Compile Remove="Tests\**" />
+        <Compile Remove="no commit\**" />
+        <Compile Remove="Editor\**" />
+        <EmbeddedResource Remove="Tests\**" />
+        <EmbeddedResource Remove="no commit\**" />
+        <EmbeddedResource Remove="Editor\**" />
+        <None Remove="Tests\**" />
+        <None Remove="no commit\**" />
+        <None Remove="Editor\**" />
+      </ItemGroup>
 
 </Project>

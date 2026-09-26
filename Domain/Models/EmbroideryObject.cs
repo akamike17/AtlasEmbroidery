@@ -158,6 +158,7 @@ public sealed class PathObject : EmbroideryObject
 public abstract class PathSegment : ICloneable
 {
     public Point Start { get; set; }
+    public abstract Point End { get; set; }
     public abstract IEnumerable<Point> GetControlPoints();
     public abstract PathSegment DeepClone();
     public abstract IEnumerable<Point> Flatten(double tolerance = 0.5);
@@ -167,7 +168,7 @@ public abstract class PathSegment : ICloneable
 
 public sealed class LineSegment : PathSegment
 {
-    public Point End { get; set; }
+    public override Point End { get; set; }
 
     public override IEnumerable<Point> GetControlPoints() => new[] { Start, End };
 
@@ -179,7 +180,7 @@ public sealed class LineSegment : PathSegment
 public sealed class QuadraticBezierSegment : PathSegment
 {
     public Point Control { get; set; }
-    public Point End { get; set; }
+    public override Point End { get; set; }
 
     public override IEnumerable<Point> GetControlPoints() => new[] { Start, Control, End };
 
@@ -219,7 +220,7 @@ public sealed class CubicBezierSegment : PathSegment
 {
     public Point Control1 { get; set; }
     public Point Control2 { get; set; }
-    public Point End { get; set; }
+    public override Point End { get; set; }
 
     public override IEnumerable<Point> GetControlPoints() => new[] { Start, Control1, Control2, End };
 
