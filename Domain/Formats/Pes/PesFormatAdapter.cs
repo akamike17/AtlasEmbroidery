@@ -173,9 +173,9 @@ public sealed class PesFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
 
     private void ParsePesV6PlusHeader(BinaryReader reader, AtlasProject project, double version)
     {
-        // Skip 4 bytes (unknown)
+        // Skip 4 bytes (unknown: scale + version string)
         reader.BaseStream.Seek(4, SeekOrigin.Current);
-        
+
         // Read metadata strings (length-prefixed)
         project.Name = ReadPesString(reader) ?? "Untitled";
         project.CustomData["category"] = ReadPesString(reader) ?? "";
@@ -185,28 +185,20 @@ public sealed class PesFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
 
         if (version >= 6.0)
         {
-            reader.BaseStream.Seek(2, SeekOrigin.Current); // OptimizeHoopChange
-            reader.BaseStream.Seek(2, SeekOrigin.Current); // DesignPageIsCustom
-            reader.ReadInt16(); // Hoop Width
-            reader.ReadInt16(); // Hoop Height
-            reader.BaseStream.Seek(2, SeekOrigin.Current); // UseExistingDesignArea
-            reader.ReadInt16(); // Design Width
-            reader.ReadInt16(); // Design Height
-            reader.ReadInt16(); // Design Page Section Width
-            reader.ReadInt16(); // Design Page Section Height
-            reader.ReadInt16(); // p6
-            reader.ReadInt16(); // Background Color
-            reader.ReadInt16(); // Foreground Color
-            reader.ReadInt16(); // Show Grid
-            reader.ReadInt16(); // With Axes
-            reader.ReadInt16(); // Snap To Grid
-            reader.ReadInt16(); // Grid Interval
-            reader.ReadInt16(); // p9
-            reader.ReadInt16(); // OptimizeEntryExitPoints
+            // Writer writes 18 ushorts (36 bytes) + 1 byte + 24 bytes (transform) + 3 ushorts (6 bytes)
+            // Read/seek the 18 ushorts (OptimizeHoopChange, DesignPageIsCustom, Hoop Width, Hoop Height,
+            // UseExistingDesignArea, Design Width, Design Height, Design Page Section Width,
+            // Design Page Section Height, p6, Background Color, Foreground Color,
+            // Show Grid, With Axes, Snap To Grid, Grid Interval, p9, OptimizeEntryExitPoints)
+            reader.BaseStream.Seek(36, SeekOrigin.Current); // 18 * 2 bytes
+
             reader.ReadByte(); // fromImageStringLength
-            
+
             // Transform matrix (6 floats = 24 bytes)
             reader.BaseStream.Seek(24, SeekOrigin.Current);
+
+            // Pattern counts (3 ushorts = 6 bytes) - programmable fills, motifs, feather patterns
+            reader.BaseStream.Seek(6, SeekOrigin.Current);
         }
 
         if (version >= 9.0)
@@ -216,40 +208,44 @@ public sealed class PesFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
         }
         else if (version >= 6.0)
         {
-            reader.BaseStream.Seek(36, SeekOrigin.Current); // image file
+            // Writer doesn't have image file here - it has pattern counts (already consumed above)
+            // No additional seek needed for v6
         }
         else if (version >= 5.0)
         {
             reader.BaseStream.Seek(24, SeekOrigin.Current); // image
         }
 
-        // Skip programmable fills, motifs, feather patterns
-        ushort countProgrammableFills = reader.ReadUInt16();
-        if (countProgrammableFills != 0) return;
-        
-        ushort countMotifs = reader.ReadUInt16();
-        if (countMotifs != 0) return;
-        
-        ushort countFeatherPatterns = reader.ReadUInt16();
-        if (countFeatherPatterns != 0) return;
+        // Skip programmable fills, motifs, feather patterns (already skipped above for v6+)
+            // For v5, these would be here
+            if (version < 6.0)
+            {
+                ushort countProgrammableFills = reader.ReadUInt16();
+                if (countProgrammableFills != 0) return;
 
-        // Read threads
-        ushort countThreads = reader.ReadUInt16();
-        var threads = new List<PesThread>();
-        for (int i = 0; i < countThreads; i++)
-        {
-            var thread = ReadPesThread(reader);
-            threads.Add(thread);
-            project.ThreadPalette.Add(thread.ToThreadColor());
-            project.ColorToNeedleMap[i] = i + 1;
-        }
+                // Skip pattern counts
+                reader.ReadUInt16(); // programmable fills
+                reader.ReadUInt16(); // motifs
+                reader.ReadUInt16(); // feather patterns
+            }
 
-        // Distinct block objects (v6+)
-        if (version >= 6.0)
-        {
-            reader.ReadInt16();
+            // Read threads
+            ushort countThreads = reader.ReadUInt16();
+            var threads = new List<PesThread>();
+            for (int i = 0; i < countThreads; i++)
+            {
+                var thread = ReadPesThread(reader);
+                threads.Add(thread);
+                project.ThreadPalette.Add(thread.ToThreadColor());
+                project.ColorToNeedleMap[i] = i + 1;
+            }
+
+            // Distinct block objects (v6+)
+            if (version >= 6.0)
+            {
+                reader.ReadInt16();
+            }
         }
-    }
 
     private string? ReadPesString(BinaryReader reader)
     {
@@ -513,15 +509,14 @@ public sealed class PesFormatAdapter : IEmbroideryFormatReader, IEmbroideryForma
 
     private void WritePesThread(BinaryWriter writer, ThreadColor thread)
     {
-        WritePesString8(writer, thread.Code ?? "");
+        WritePesString8(writer, thread.Code ?? "");       // CatalogNumber
         writer.Write(thread.R);
         writer.Write(thread.G);
         writer.Write(thread.B);
-        writer.Write((byte)0); // unknown
-        writer.Write(0x0A); // Custom color flag
-        WritePesString8(writer, thread.Description ?? "");
-        WritePesString8(writer, thread.Brand ?? "");
-        WritePesString8(writer, thread.Code ?? "");
+        writer.Write(new byte[5]); // unknown (1) + custom color flag (4)
+        WritePesString8(writer, thread.Description ?? ""); // Description
+        WritePesString8(writer, thread.Brand ?? "");       // Brand
+        WritePesString8(writer, thread.Code ?? "");        // Chart (use Code as fallback)
     }
 
     private void WritePesStitchBlocks(BinaryWriter writer, AtlasProject project, StitchPlan plan, List<StitchPoint> allStitches)

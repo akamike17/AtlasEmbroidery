@@ -180,7 +180,12 @@ public sealed class StitchEngine
     {
         var stitches = new List<StitchPoint>();
 
-        if (shape.Vertices.Count < 3) return stitches;
+        // For open paths (Running/Triple stitch on 2 vertices), allow 2 vertices
+        // For closed shapes, require at least 3 vertices
+        bool isOpenPath = !shape.IsClosed && shape.Vertices.Count == 2;
+        bool isClosedShape = shape.Vertices.Count >= 3;
+
+        if (!isOpenPath && !isClosedShape) return stitches;
 
         // Aplanar curvas si las hay
         var vertices = shape.Vertices;
@@ -189,23 +194,29 @@ public sealed class StitchEngine
         {
             case StitchType.Running:
             case StitchType.Triple:
-                stitches.AddRange(GenerateRunningStitches(vertices, param, true));
+                // Allow running stitch on 2-vertex open paths
+                stitches.AddRange(GenerateRunningStitches(vertices, param, shape.IsClosed));
                 break;
             case StitchType.Satin:
-                stitches.AddRange(GenerateSatinStitches(vertices, param, plan));
+                if (isClosedShape)
+                    stitches.AddRange(GenerateSatinStitches(vertices, param, plan));
                 break;
             case StitchType.Tatami:
-                stitches.AddRange(GenerateTatamiStitches(vertices, param, plan));
+                if (isClosedShape)
+                    stitches.AddRange(GenerateTatamiStitches(vertices, param, plan));
                 break;
             case StitchType.Zigzag:
-                stitches.AddRange(GenerateZigzagStitches(vertices, param, plan));
+                if (isClosedShape)
+                    stitches.AddRange(GenerateZigzagStitches(vertices, param, plan));
                 break;
             case StitchType.Contour:
-                stitches.AddRange(GenerateContourStitches(vertices, param));
+                if (isClosedShape)
+                    stitches.AddRange(GenerateContourStitches(vertices, param));
                 break;
             default:
                 // Default a tatami para formas cerradas
-                stitches.AddRange(GenerateTatamiStitches(vertices, param, plan));
+                if (isClosedShape)
+                    stitches.AddRange(GenerateTatamiStitches(vertices, param, plan));
                 break;
         }
 
